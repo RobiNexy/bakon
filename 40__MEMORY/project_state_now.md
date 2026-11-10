@@ -4,11 +4,11 @@
 
 ## Current state
 
-- 当前可运行实现是 0.x：Go + git 后端，功能完整，位于 `internal/`。2026-11-10 的形式化审计发现 13 项缺陷（[[design-audit-2026-11-10]]），其中 4 项可造成数据损坏。
-- 已决定放弃 git 后端，用 Rust 重写 v1：[[ADR__replace-git-with-own-content-addressed-store]]、[[ADR__rewrite-in-rust]]。
+- v1（Rust）是当前工作线，位于 `v1-rust` 分支（领先 `main` 13 个提交）；`main` 保留 0.x（Go + git）作为历史。依据：[[ADR__replace-git-with-own-content-addressed-store]]、[[ADR__rewrite-in-rust]]。
 - v1 形式论证与详细设计已完成；M0–M2 已落地在 `crates/`：对象层、清单层、`edit`/`log`/`show`/`diff`/`revert`/`prune`/`mv`/`hook`/`config`/`verify`、写回与崩溃恢复。13 项审计缺陷的回归用例在 `crates/bakon/tests/regressions.rs`。
-- M3 已完成崩溃注入、并发用例、性能实测、文档同步、7 个目标的 `cargo check`，以及 Windows/macOS runner 冒烟（build、`init`、`verify`；Windows 另含 `edit`/`log`/`revert`）。Windows 钩子与并发用例、7 个目标的可链接产物与发布路径未验证。设计入口：[[MODULE__bakon-v1-design]]。
-- 0.x 不再接受独立缺陷修复，除非 v1 延期；旧 `repo/` 不被读取也不被删除。
+- M3 已完成崩溃注入、并发用例、性能实测、7 个目标的 `cargo check`，以及 Windows/macOS runner 冒烟（build、`init`、`verify`；Windows 另含 `edit`/`log`/`revert`）。Windows 钩子与并发用例、7 个目标的可链接产物与发布路径未验证。设计入口：[[MODULE__bakon-v1-design]]。
+- 0.x 的 `docs/design.md` 与 `docs/new_design.md` 已删除；`docs/` 只保留审计报告 [[design-audit-2026-11-10]]（历史证据）与 Go 旧提示文档。`README.md`、`README.en.md` 与项目文档只描述 v1。
+- 0.x 代码仍在 `internal/`、`main.go`、`go.mod` 与 `scripts/build.sh`，不再接受独立缺陷修复，除非 v1 延期；旧 `repo/` 不被读取也不被删除。
 
 ## Known limitations
 
@@ -17,9 +17,7 @@
 - 旧存储迁移不在 v1.0 范围。
 - `edit` 通过 `sh -c` 启动编辑器，Windows 语义属 M3。
 - 端到端 1 MB 文本提交实测约 50 ms（本机 ext4/NVMe），验收预算已调整为 60 ms；成本主要是进程启动、编辑器与 fsync。
-- `README.md`、`README.en.md` 与 `docs/design.md` 已标注 0.x 为历史，v1 说明指向 `crates/` 与 `design/`。
 
 ## Important deviations
 
-- `docs/` 与 `design/` 描述两个不同版本：`docs/` 是 0.x 的实现设计（含 §12 的实现裁决），`design/` 是 v1 的目标设计。讨论当前代码以 `docs/` 为准，讨论下一步以 `design/` 为准。
-- 0.x 的 `docs/design.md` §12 与 `new_design.md` 之间存在自相矛盾（`migrate` 是否实现），v1 文档不再引用二者。
+- `design/API__store-contract-and-cli.md` §5 列出的 `bakon ls`、`bakon path`、`bakon store` 尚未实现；CLI 目前只有 13 个命令。已在任务板跟踪。

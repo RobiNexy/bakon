@@ -2,171 +2,163 @@
 
 > 编辑关键文件时，无感地保留版本历史。
 
-> **状态：v1 重写进行中。** `main` 上的 0.x 使用 Go + Git；`v1-rust` 分支用 Rust 重写并自建内容寻址存储，已完成 M0–M2。下文安装与命令说明仍描述 0.x；v1 的构建方式见「v1（开发中）」，设计见 [`design/`](design/)。
-
 [English](README.en.md) | 中文
 
 [![CI](https://github.com/RobiNexy/Bakon/actions/workflows/ci.yml/badge.svg)](https://github.com/RobiNexy/Bakon/actions/workflows/ci.yml)
 
-Bakon 是一个单机命令行文件版本管理工具。它使用熟悉的编辑器原地修改 `nginx.conf`、`hosts`、crontab 等关键文件，同时把每次变更保存到独立的 Git 仓库，支持查看历史、比较差异、导出版本和安全回退。
+Bakon 是面向个人开发者的单机命令行文件版本管理工具：用熟悉的编辑器原地修改 `nginx.conf`、`hosts`、crontab 等关键文件，同时把每次变更保存进独立的本地存储，支持查看历史、比较差异、导出指定版本与安全回退。
 
-- 单机、单人、无协作，不提供远端同步或分支合并
-- 文件历史使用递增整数版本号，回退只追加新版本，不覆盖旧历史
-- 编辑器原地操作目标文件，Bakon 只在仓库中保存副本
-- 支持每文件保留上限、变更钩子、原子写入和并发锁
+v1 使用 Rust 实现，自建内容寻址存储，不调用 git 或任何外部命令。
 
-## v1（开发中）
+- 单机、单人，不提供远端同步、多人协作或分支合并
+- 版本号是递增整数；回退只追加新版本，旧版本始终可追溯
+- 目标文件由用户自己的编辑器原地修改，Bakon 只保存副本
+- 全局保留上限、变更钩子、原子写入、写锁与崩溃恢复
+- 单文件二进制，零运行时依赖
 
-Rust 工作区位于 `crates/`，不依赖 git，存储默认 `~/.bakon/store`：
+当前分支 `v1-rust` 是 v1 主线；`main` 保留 0.x（Go + Git）历史。
+
+## 构建与安装
+
+工具链由 `rust-toolchain.toml` 固定：
 
 ```sh
 cargo build --release -p bakon
-cargo test --workspace
-target/release/bakon edit /etc/nginx/nginx.conf
+cargo test --workspace --all-targets
+
+target/release/bakon version
+cargo install --path crates/bakon
 ```
 
-设计入口：[`design/MODULE__bakon-v1-design.md`](design/MODULE__bakon-v1-design.md)。发布产物与 Windows 语义尚未完成，见任务板。
-
-## 安装
-
-从 [Releases](../../releases) 下载对应平台的压缩包。校验值位于 `checksums.txt`。
-
-| 压缩包 | 平台 |
-|---|---|
-| `bakon_<ver>_linux-amd64.tar.gz` | Linux x86-64 |
-| `bakon_<ver>_linux-arm64.tar.gz` | Linux arm64 |
-| `bakon_<ver>_termux-arm64.tar.gz` | Android Termux aarch64 |
-| `bakon_<ver>_linux-armv7.tar.gz` | Linux armv7 / Android Termux 32 位 |
-| `bakon_<ver>_darwin-amd64.tar.gz` | macOS Intel |
-| `bakon_<ver>_darwin-arm64.tar.gz` | macOS Apple Silicon |
-| `bakon_<ver>_windows-amd64.zip` | Windows x86-64 |
-| `bakon_<ver>_windows-arm64.zip` | Windows arm64 |
-
-### Linux / macOS
-
-```sh
-BAKON_VER=v0.1.0
-curl -fLo /tmp/bakon.tar.gz \
-  "https://github.com/RobiNexy/Bakon/releases/download/${BAKON_VER}/bakon_${BAKON_VER}_linux-amd64.tar.gz"
-tar -xzf /tmp/bakon.tar.gz -C /tmp
-install /tmp/bakon_${BAKON_VER}_linux-amd64/bakon ~/.local/bin/bakon
-```
-
-### Android Termux
-
-Termux 使用单独发布的 `termux-arm64` 归档；运行时仍需安装 `git`。
-
-```sh
-pkg install git
-BAKON_VER=v0.1.0
-curl -fLo /tmp/bakon.tar.gz \
-  "https://github.com/RobiNexy/Bakon/releases/download/${BAKON_VER}/bakon_${BAKON_VER}_termux-arm64.tar.gz"
-tar -xzf /tmp/bakon.tar.gz -C /tmp
-mkdir -p "$PREFIX/bin"
-install /tmp/bakon_${BAKON_VER}_termux-arm64/bakon "$PREFIX/bin/bakon"
-```
-
-### 从源码安装
-
-```sh
-go install github.com/RobiNexy/Bakon@latest
-```
-
-或：
-
-```sh
-git clone https://github.com/RobiNexy/Bakon && cd Bakon
-go build .
-```
-
-运行时依赖：系统 `git`；编辑器和钩子在 Unix 上经 `sh` 执行，在 Windows 上经 `cmd /C` 执行。
+v1 的发布流程尚未接入，当前从源码构建。
 
 ## 快速开始
 
 ```sh
-# 首次编辑会保存纳管前内容为版本 0
+bakon init
 bakon edit /etc/nginx/nginx.conf
 
 bakon log /etc/nginx/nginx.conf
 bakon diff /etc/nginx/nginx.conf
-bakon show /etc/nginx/nginx.conf 2
-bakon revert /etc/nginx/nginx.conf 2
+bakon show /etc/nginx/nginx.conf 1
+bakon revert /etc/nginx/nginx.conf 1
+
 bakon hook set /etc/nginx/nginx.conf "systemctl reload nginx"
+bakon verify
 ```
+
+首次 `edit` 会自动纳管文件，并把编辑前的内容保存为版本 0。
 
 ## 命令
 
 | 命令 | 作用 |
 |---|---|
-| `bakon edit <file>` | 打开编辑器；有变更时提交新版本 |
-| `bakon log <file>` | 列出历史版本；`--format json` 输出 JSON Lines |
-| `bakon diff <file> [v1] [v2]` | 比较版本；有差异时退出码为 1 |
-| `bakon show <file> <v>` | 输出指定版本内容 |
-| `bakon dump <file> <v>` | 二进制原样输出指定版本，供管道使用 |
-| `bakon revert <file> <v>` | 恢复版本并追加一次新版本 |
-| `bakon ls` | 列出所有被管理文件 |
-| `bakon mv <old> <new>` | 更新路径映射并保留历史 |
-| `bakon prune [<file>]` | 按保留上限裁剪历史 |
-| `bakon hook set/unset/show` | 管理文件变更钩子 |
-| `bakon path <file>` | 输出文件的稳定内部映射 |
-| `bakon verify` | 检查仓库与索引一致性 |
-| `bakon config show/init` | 查看或初始化配置 |
-| `bakon version` | 输出版本与构建信息 |
+| `bakon init` | 创建存储，或校验已有存储 |
+| `bakon version` | 输出程序版本与构建目标 |
+| `bakon edit <file>` | 打开编辑器；内容有变化时追加版本 |
+| `bakon log <file>` | 列出历史版本，最新在前 |
+| `bakon show <file> <ver>` | 输出指定版本的原始内容 |
+| `bakon dump <file> <ver>` | 同 `show`，供管道使用 |
+| `bakon diff <file> [v1] [v2]` | 比较版本；0 个参数比较最近两版，1 个参数与其前一版比较 |
+| `bakon revert <file> <ver>` | 恢复版本，并把恢复动作追加为新版本；`--force` 先记录当前内容为 `salvage` |
+| `bakon prune [<file>]` | 按保留上限裁剪；`--dry-run` 只报告 |
+| `bakon mv <old> <new>` | 只更新路径映射，不移动磁盘文件 |
+| `bakon hook set\|unset\|show <file> [cmd]` | 管理每文件变更钩子 |
+| `bakon config show\|init` | 查看生效配置或写入默认配置 |
+| `bakon verify` | 检查一致性；`--fix` 修复派生数据，`--size` 报告占用 |
 
-全局选项：`--config`、`--store`、`--format human|plain|json`、`--no-color`、`--no-hook`。
+全局选项：`--store <dir>`、`--config <file>`、`--format human|plain|json`、`--lock-timeout <ms>`（默认 2000）。
+
+`stdout` 只输出数据，诊断与进度输出到 `stderr`。
+
+## 存储
+
+默认位置是 `~/.bakon/store`。优先级：
+
+1. `--store`
+2. `BAKON_STORE`
+3. 配置文件的 `store`
+4. `$BAKON_HOME/store`
+5. `~/.bakon/store`
+
+```text
+store/
+├── BAKON_STORE          归属与 schema 标记
+├── .lock                排他/共享锁
+├── .pending             待写回标记（存在时才有）
+├── index.json           路径到身份的派生缓存，可重建
+├── files/<id>.json      权威版本清单
+├── objects/aa/<rest>    内容寻址对象（deflate）
+├── objects/tmp/         写入暂存
+└── trash/               待删除对象
+```
+
+清单是版本事实的唯一来源，对象按内容哈希命名并去重。备份就是复制整个存储目录；恢复后执行 `bakon verify`。`verify` 报不一致时退出码为 6，`--fix` 只修复尺寸字段、索引与残留目录，不猜测历史。
+
+v1 不读取 0.x 的 `~/.bakon/repo`，也不自动迁移。旧目录与旧二进制可以并存，需要旧历史时先用 0.x 导出。
 
 ## 配置
 
-默认配置使用 XDG 路径：
+配置文件位置，优先级从高到低：
 
-- 配置：`$XDG_CONFIG_HOME/bakon/config.toml`
-- 数据仓库：`$XDG_DATA_HOME/bakon/repo/`
-- 未设置 XDG 变量时兼容使用 `~/.bakon/`
-- `BAKON_HOME` 可将配置和仓库放到指定目录，适合测试与隔离运行
+1. `--config`
+2. `BAKON_CONFIG`
+3. `$BAKON_HOME/config.toml`
+4. `$XDG_CONFIG_HOME/bakon/config.toml`
+5. `~/.config/bakon/config.toml`
+
+`bakon config init` 写入默认配置：
 
 ```toml
-editor = ""                 # 优先级：配置 > BAKON_EDITOR > VISUAL > EDITOR > vi
-store = "~/.bakon/repo"
+# store = "/absolute/path/to/store"
+# editor = "vi"
 
 [retention]
-max_versions = 100           # 0 = 不限制
-
-[output]
-color = "auto"              # auto | always | never
-format = "human"             # human | plain | json
+max_versions = 100   # 0 = 不限制
 ```
 
-环境变量覆盖包括 `BAKON_EDITOR`、`BAKON_STORE`、`BAKON_FORMAT`、`BAKON_COLOR` 和 `BAKON_RETENTION_MAX_VERSIONS`。每文件的 `hook` 与 `max_versions` 保存在仓库的 `index.json` 中。
+编辑器按 `$VISUAL` → `$EDITOR` → 配置 `editor` → `vi` 的顺序选择。
 
 ## 钩子
 
-钩子在 `edit` 或 `revert` 产生新版本后、释放锁前执行。执行环境包含：
+钩子在版本提交之后、锁释放之后执行，至多执行一次。执行环境包含：
 
 ```text
 BAKON_FILE       目标文件绝对路径
 BAKON_VERSION    新版本号
 BAKON_SOURCE     edit 或 revert
-BAKON_PREV       上一个版本号；首次为空
+BAKON_PREV       上一版本号；首个版本为空
+BAKON_HOOK=1     防止钩子递归调用
 ```
 
-钩子失败不会回滚已经保存的版本，命令退出码为 5。紧急场景可使用 `--no-hook` 跳过钩子。
+钩子失败不会回滚已保存的版本，命令退出码为 5。`--no-hook` 可跳过钩子。
+
+## 平台说明
+
+- Windows 没有目录 `fsync` 的等价语义，崩溃恢复可能丢失最后一次提交，但不会产生清单与对象混合的状态。
+- 编辑器与钩子在 Unix 上经 `sh -c` 执行，在 Windows 上经 `cmd /C` 执行。
+- 存储只支持本地文件系统；网络文件系统上的锁与原子替换不在保证范围内。
 
 ## 退出码
 
 | 代码 | 含义 |
 |---:|---|
-| 0 | 成功 |
-| 1 | diff 发现差异或一般失败 |
-| 2 | 参数或命令用法错误 |
+| 0 | 成功、无改动，或 `verify` 一致 |
+| 1 | `diff` 发现差异；只有这一种情况使用 1 |
+| 2 | 参数、配置或命令用法错误 |
 | 3 | 文件或版本不存在，或版本已被裁剪 |
-| 4 | 锁竞争或状态冲突 |
-| 5 | 版本已保存，但钩子失败 |
-| 6 | 仓库损坏或不一致 |
+| 4 | 锁超时、并发冲突或路径状态冲突 |
+| 5 | 版本已保存，但钩子或编辑器失败 |
+| 6 | 存储损坏、不一致、非 bakon 存储或 schema 不符 |
+| 7 | 版本已记录，但写回目标文件失败 |
+| 8 | 权限或一般 IO 错误 |
 | 70 | 内部错误 |
 
-版本号不会因 `prune` 回收；被裁剪的版本不可恢复。`revert` 到当前内容时不会创建空版本。
+## 设计文档
 
-设计文档：[docs/design.md](docs/design.md) · [docs/new_design.md](docs/new_design.md)
+- 设计入口：[`design/MODULE__bakon-v1-design.md`](design/MODULE__bakon-v1-design.md)
+- 状态机、数据格式、写入协议与 CLI 契约见 [`design/`](design/)
+- 0.x 的形式化审计（历史证据）：[`docs/design-audit-2026-11-10.md`](docs/design-audit-2026-11-10.md)
 
 ## License
 

@@ -4,7 +4,7 @@
 
 ## One-line positioning
 
-Bakon 是面向个人开发者的单机命令行文件版本管理工具：用熟悉的编辑器原地修改 `nginx.conf`、`hosts`、crontab 等关键文件，同时把每次变更保存进独立的 Git 仓库（2026-11-10 人工确认）。
+Bakon 是面向个人开发者的单机命令行文件版本管理工具：用熟悉的编辑器原地修改 `nginx.conf`、`hosts`、crontab 等关键文件，同时把每次变更保存进独立的自建内容寻址存储（2026-11-10 人工确认；v1 不依赖 Git）。
 
 ## Goals and success criteria
 
@@ -19,6 +19,6 @@ Bakon 是面向个人开发者的单机命令行文件版本管理工具：用�
 ## Key constraints
 
 - People: 单开发者，无协作
-- Stack: Go 1.27；纯 Go、`CGO_ENABLED=0` 静态编译；依赖 cobra、toml、flock
-- Deployment target: 以 GitHub Releases 分发的单文件二进制，覆盖 linux / darwin / windows 与 Android Termux（amd64、arm64、armv7）
+- Stack: Rust；工具链由 `rust-toolchain.toml` 固定；纯 Rust 依赖；单文件二进制，零运行时依赖
+- Deployment target: 以 GitHub Releases 分发的单文件二进制，覆盖 linux（amd64、arm64、armv7）、macOS（amd64、arm64）与 Windows（amd64、arm64）
 - Budget and compliance: Unconfirmed

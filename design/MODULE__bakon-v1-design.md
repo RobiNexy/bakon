@@ -60,7 +60,7 @@ store/
 └── trash/                   待删除对象
 ```
 
-路径默认 `$XDG_DATA_HOME/bakon/store`；`BAKON_HOME` 存在时为 `$BAKON_HOME/store`；`--store` 覆盖。0.x 的 `repo/` 不被读取也不被修改。
+路径默认 `~/.bakon/store`；优先级为 `--store` > `BAKON_STORE` > 配置 `store` > `BAKON_HOME/store` > `~/.bakon/store`，见 [[OPS__store-identity-recovery-and-retention]] §1。0.x 的 `repo/` 不被读取也不被修改。
 
 格式定义与字段语义见 [[DATA__version-manifest-and-numbering]]；写入顺序见 [[DATA__blob-store-and-durability]]。
 

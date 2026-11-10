@@ -2,171 +2,163 @@
 
 > Effortlessly keep version history while editing critical files.
 
-> **Status: v1 rewrite in progress.** `main` still carries 0.x (Go + Git); the `v1-rust` branch is a Rust rewrite with its own content-addressed store and has completed M0–M2. The installation and command text below describes 0.x; see “v1 (in progress)” for building v1 and [`design/`](design/) for the design.
-
 [English](README.en.md) | [中文](README.md)
 
 [![CI](https://github.com/RobiNexy/Bakon/actions/workflows/ci.yml/badge.svg)](https://github.com/RobiNexy/Bakon/actions/workflows/ci.yml)
 
-Bakon is a single-machine command-line file version manager. It lets your usual editor modify critical files such as `nginx.conf`, `hosts`, and crontabs in place while saving every change to a private Git repository. View history, compare versions, export snapshots, and roll back without overwriting history.
+Bakon is a single-machine command-line file version manager for individual developers. It lets your usual editor modify critical files such as `nginx.conf`, `hosts`, and crontabs in place while saving every change to a private local store. View history, compare versions, export snapshots, and roll back safely.
 
-- Single machine and single user; no remotes, collaboration, or merge branches
-- Per-file append-only integer versions; rollback creates a new version
-- The target file is edited in place; Bakon stores copies only in its repository
-- Per-file retention, hooks, atomic writes, and serialized write operations
+v1 is implemented in Rust with its own content-addressed store. It does not call git or any external command.
 
-## v1 (in progress)
+- Single machine, single user; no remotes, collaboration, or merge branches
+- Integer versions that only increase; rollback appends a new version, so old versions stay reachable
+- The target file is edited in place by your own editor; Bakon stores copies only
+- Global retention limit, per-file hooks, atomic writes, write locking, and crash recovery
+- One binary with no runtime dependencies
 
-The Rust workspace lives in `crates/`, does not call git, and defaults to `~/.bakon/store`:
+The `v1-rust` branch is the v1 line; `main` keeps the 0.x (Go + Git) history.
+
+## Build and install
+
+The toolchain is pinned by `rust-toolchain.toml`:
 
 ```sh
 cargo build --release -p bakon
-cargo test --workspace
-target/release/bakon edit /etc/nginx/nginx.conf
+cargo test --workspace --all-targets
+
+target/release/bakon version
+cargo install --path crates/bakon
 ```
 
-Design entry: [`design/MODULE__bakon-v1-design.md`](design/MODULE__bakon-v1-design.md). Release artifacts and Windows semantics are still open; see the task board.
+The v1 release pipeline is not wired up yet; build from source for now.
 
-## Installation
-
-Download a platform archive from [Releases](../../releases). Checksums are in `checksums.txt`.
-
-| Archive | Platform |
-|---|---|
-| `bakon_<ver>_linux-amd64.tar.gz` | Linux x86-64 |
-| `bakon_<ver>_linux-arm64.tar.gz` | Linux arm64 |
-| `bakon_<ver>_termux-arm64.tar.gz` | Android Termux aarch64 |
-| `bakon_<ver>_linux-armv7.tar.gz` | Linux armv7 / Android Termux 32-bit |
-| `bakon_<ver>_darwin-amd64.tar.gz` | macOS Intel |
-| `bakon_<ver>_darwin-arm64.tar.gz` | macOS Apple Silicon |
-| `bakon_<ver>_windows-amd64.zip` | Windows x86-64 |
-| `bakon_<ver>_windows-arm64.zip` | Windows arm64 |
-
-### Linux / macOS
+## Quick start
 
 ```sh
-BAKON_VER=v0.1.0
-curl -fLo /tmp/bakon.tar.gz \
-  "https://github.com/RobiNexy/Bakon/releases/download/${BAKON_VER}/bakon_${BAKON_VER}_linux-amd64.tar.gz"
-tar -xzf /tmp/bakon.tar.gz -C /tmp
-install /tmp/bakon_${BAKON_VER}_linux-amd64/bakon ~/.local/bin/bakon
-```
-
-### Android Termux
-
-Termux has a dedicated `termux-arm64` archive. `git` is still required at runtime.
-
-```sh
-pkg install git
-BAKON_VER=v0.1.0
-curl -fLo /tmp/bakon.tar.gz \
-  "https://github.com/RobiNexy/Bakon/releases/download/${BAKON_VER}/bakon_${BAKON_VER}_termux-arm64.tar.gz"
-tar -xzf /tmp/bakon.tar.gz -C /tmp
-mkdir -p "$PREFIX/bin"
-install /tmp/bakon_${BAKON_VER}_termux-arm64/bakon "$PREFIX/bin/bakon"
-```
-
-### From source
-
-```sh
-go install github.com/RobiNexy/Bakon@latest
-```
-
-Or:
-
-```sh
-git clone https://github.com/RobiNexy/Bakon && cd Bakon
-go build .
-```
-
-Runtime dependencies are the system `git` command. Editors and hooks run through `sh` on Unix and `cmd /C` on Windows.
-
-## Quick Start
-
-```sh
-# The first edit stores the pre-adoption content as version 0
+bakon init
 bakon edit /etc/nginx/nginx.conf
 
 bakon log /etc/nginx/nginx.conf
 bakon diff /etc/nginx/nginx.conf
-bakon show /etc/nginx/nginx.conf 2
-bakon revert /etc/nginx/nginx.conf 2
+bakon show /etc/nginx/nginx.conf 1
+bakon revert /etc/nginx/nginx.conf 1
+
 bakon hook set /etc/nginx/nginx.conf "systemctl reload nginx"
+bakon verify
 ```
+
+The first `edit` tracks the file and saves its pre-edit content as version 0.
 
 ## Commands
 
-| Command | Purpose |
+| Command | Effect |
 |---|---|
-| `bakon edit <file>` | Open the editor and commit a new version when content changes |
-| `bakon log <file>` | List history; `--format json` emits JSON Lines |
-| `bakon diff <file> [v1] [v2]` | Compare versions; exits 1 when differences are found |
-| `bakon show <file> <v>` | Print a version's content |
-| `bakon dump <file> <v>` | Write a version as binary-safe pipeline data |
-| `bakon revert <file> <v>` | Restore a version and append a new version |
-| `bakon ls` | List all managed files |
-| `bakon mv <old> <new>` | Update a path mapping while keeping history |
-| `bakon prune [<file>]` | Trim history according to retention limits |
-| `bakon hook set/unset/show` | Manage a file's change hook |
-| `bakon path <file>` | Print the stable internal mapping |
-| `bakon verify` | Check repository and index consistency |
-| `bakon config show/init` | Show or initialize configuration |
-| `bakon version` | Print version and build information |
+| `bakon init` | Create the store, or validate an existing one |
+| `bakon version` | Print the program version and build target |
+| `bakon edit <file>` | Open the editor; append a version when the content changed |
+| `bakon log <file>` | List versions, newest first |
+| `bakon show <file> <ver>` | Write one version's raw content to stdout |
+| `bakon dump <file> <ver>` | Same as `show`, kept as a pipeline-friendly name |
+| `bakon diff <file> [v1] [v2]` | Compare versions; no arguments compares the last two, one compares with its predecessor |
+| `bakon revert <file> <ver>` | Restore a version and record the restore as a new version; `--force` records the current content as `salvage` first |
+| `bakon prune [<file>]` | Trim by the retention limit; `--dry-run` only reports |
+| `bakon mv <old> <new>` | Change the recorded path only; the file on disk is untouched |
+| `bakon hook set\|unset\|show <file> [cmd]` | Manage a per-file hook |
+| `bakon config show\|init` | Show effective configuration or write a default file |
+| `bakon verify` | Check consistency; `--fix` repairs derived data, `--size` reports usage |
 
-Global options: `--config`, `--store`, `--format human|plain|json`, `--no-color`, and `--no-hook`.
+Global options: `--store <dir>`, `--config <file>`, `--format human|plain|json`, `--lock-timeout <ms>` (default 2000).
+
+`stdout` carries data only; diagnostics and progress go to `stderr`.
+
+## Store
+
+The default location is `~/.bakon/store`. Precedence:
+
+1. `--store`
+2. `BAKON_STORE`
+3. the `store` field in the config file
+4. `$BAKON_HOME/store`
+5. `~/.bakon/store`
+
+```text
+store/
+├── BAKON_STORE          ownership and schema marker
+├── .lock                exclusive/shared lock
+├── .pending             pending-apply marker (only when present)
+├── index.json           path-to-identity cache; rebuildable
+├── files/<id>.json      authoritative version manifests
+├── objects/aa/<rest>    content-addressed objects (deflate)
+├── objects/tmp/         write staging
+└── trash/               objects awaiting deletion
+```
+
+Manifests are the only source of version facts. Objects are named by content hash and deduplicated. Back up by copying the whole store directory; run `bakon verify` after restoring. An inconsistent store exits 6; `--fix` repairs only size fields, the index, and leftover directories, never guessed history.
+
+v1 does not read 0.x's `~/.bakon/repo` and does not migrate automatically. The old directory and old binary can coexist; export with 0.x before switching if you need that history.
 
 ## Configuration
 
-The default configuration follows XDG locations:
+Config file locations, highest priority first:
 
-- Config: `$XDG_CONFIG_HOME/bakon/config.toml`
-- Repository: `$XDG_DATA_HOME/bakon/repo/`
-- When XDG variables are unset, the historical `~/.bakon/` location remains supported
-- `BAKON_HOME` places config and repository data in an isolated directory
+1. `--config`
+2. `BAKON_CONFIG`
+3. `$BAKON_HOME/config.toml`
+4. `$XDG_CONFIG_HOME/bakon/config.toml`
+5. `~/.config/bakon/config.toml`
+
+`bakon config init` writes the default file:
 
 ```toml
-editor = ""                 # config > BAKON_EDITOR > VISUAL > EDITOR > vi
-store = "~/.bakon/repo"
+# store = "/absolute/path/to/store"
+# editor = "vi"
 
 [retention]
-max_versions = 100           # 0 = unlimited
-
-[output]
-color = "auto"              # auto | always | never
-format = "human"             # human | plain | json
+max_versions = 100   # 0 = unlimited
 ```
 
-Environment overrides include `BAKON_EDITOR`, `BAKON_STORE`, `BAKON_FORMAT`, `BAKON_COLOR`, and `BAKON_RETENTION_MAX_VERSIONS`. Per-file `hook` and `max_versions` settings live in the repository's `index.json`.
+The editor is chosen as `$VISUAL` → `$EDITOR` → configured `editor` → `vi`.
 
 ## Hooks
 
-A hook runs after a new version is created by `edit` or `revert`, while the repository lock is still held. It receives:
+A hook runs after the version is committed and after the lock is released, at most once. It receives:
 
 ```text
 BAKON_FILE       absolute target path
 BAKON_VERSION    new version number
 BAKON_SOURCE     edit or revert
 BAKON_PREV       previous version number; empty for the first version
+BAKON_HOOK=1     prevents recursive hook execution
 ```
 
-Hook failure does not roll back a saved version and exits with code 5. Use `--no-hook` to skip hooks for an emergency operation.
+Hook failure does not roll back a saved version and exits with code 5. `--no-hook` skips the hook.
 
-## Exit Codes
+## Platform notes
+
+- Windows has no directory `fsync` equivalent; crash recovery may lose the last commit, but never produces a mixed manifest/object state.
+- The editor and hooks run through `sh -c` on Unix and `cmd /C` on Windows.
+- The store supports local file systems only; locks and atomic replacement on network file systems are outside the guarantees.
+
+## Exit codes
 
 | Code | Meaning |
 |---:|---|
-| 0 | Success |
-| 1 | Diff found differences or generic failure |
-| 2 | Usage or argument error |
-| 3 | File/version not found, or version was pruned |
-| 4 | Lock contention or state conflict |
-| 5 | Version saved, but hook failed |
-| 6 | Corrupt or inconsistent repository |
+| 0 | Success, no change, or `verify` found the store consistent |
+| 1 | `diff` found differences; this is the only use of 1 |
+| 2 | Usage, configuration, or argument error |
+| 3 | File or version not found, or the version was pruned |
+| 4 | Lock timeout, concurrent conflict, or path state conflict |
+| 5 | Version saved, but the hook or editor failed |
+| 6 | Corrupt or inconsistent store, not a bakon store, or schema mismatch |
+| 7 | Version recorded, but writing back to the target file failed |
+| 8 | Permission or general I/O error |
 | 70 | Internal error |
 
-Version numbers are never recycled by `prune`; pruned versions cannot be recovered. Reverting to content that already matches the current version does not create an empty version.
+## Design documents
 
-Design documents: [docs/design.md](docs/design.md) · [docs/new_design.md](docs/new_design.md)
+- Entry point: [`design/MODULE__bakon-v1-design.md`](design/MODULE__bakon-v1-design.md)
+- State machine, data formats, write protocol, and CLI contract: [`design/`](design/)
+- The 0.x formal audit (historical evidence): [`docs/design-audit-2026-11-10.md`](docs/design-audit-2026-11-10.md)
 
 ## License
 
