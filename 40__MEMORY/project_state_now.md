@@ -16,10 +16,10 @@
 - 7 个交叉编译目标的工具链尚未验证；本机只有宿主默认目标 `x86_64-unknown-linux-gnu`（Rust stable 1.99.1 已装，`~/.cargo/bin` 在 PATH）。
 - 旧存储迁移不在 v1.0 范围；旧 `repo/` 不被读取也不被删除。
 - `edit` 通过 `sh -c` 启动编辑器，Windows 语义属 M3。
-- 复审剩余 P2/P3：大小写与符号链接 `..` 的路径身份、`Ver`/`FileId` 与写回顺序未由类型签名承载、`prune` 仍扫描全库版本、`codec` 字段不参与读取分派。
+- 复审剩余：`commit`/`prune`/`rename` 的写锁仍是调用点约定；Windows/macOS 大小写路径键未在 runner 验证；实际裁剪仍需全局引用扫描。`..` 路径、类型化写回、`codec` 分派与 CLI 命令已修复。
 - 端到端 1 MB 文本提交实测约 50 ms（本机 ext4/NVMe），验收预算已调整为 60 ms；成本主要是进程启动、编辑器与 fsync。
 
 ## Important deviations
 
-- 复审剩余项：`Ver`/`FileId` 的构造入口仍宽于设计声明；路径身份未做平台归一化；`prune` 的命令成本仍与全库版本数相关；`codec` 扩展点尚未分派。
+- 复审剩余项：`commit`/`prune`/`rename` 的写锁仍是调用点约定；Windows/macOS 大小写路径键未在真实 runner 验证；实际裁剪仍需全局引用扫描。
 - 0.x 的 `docs/design.md` 与 `docs/new_design.md` 已删除，旧审计只作为历史证据保留；当前设计以 `design/` 为准。

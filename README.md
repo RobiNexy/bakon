@@ -30,7 +30,7 @@ target/release/bakon version
 cargo install --path crates/bakon
 ```
 
-v1 的发布流程尚未接入，当前从源码构建。
+v1 的发布工作流位于 `.github/workflows/release.yml`，用 cargo 与 cross 构建 7 个目标；尚未在真实 tag 上演练。
 
 ## 快速开始
 

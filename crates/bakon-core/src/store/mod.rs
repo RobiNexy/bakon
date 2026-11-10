@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::clock::now_rfc3339;
 use crate::fsutil::{remove_dir_contents, write_atomic};
-use crate::manifest::{Manifest, Source, VersionRecord};
+use crate::manifest::{Codec, Manifest, Source, VersionRecord};
 use crate::object::{ObjectStore, hash_bytes};
 use crate::types::{AbsPath, BlobHash, FileId, Ver};
 use crate::{Error, Result};
@@ -123,6 +123,19 @@ impl Committed {
     pub fn trim_failed(self) -> bool {
         self.trim_failed
     }
+
+    /// 只有已提交的版本才能写回目标文件。
+    pub fn apply(self, store: &Store, target: &AbsPath) -> Result<()> {
+        let manifest = store.manifest(self.id)?;
+        let record = manifest
+            .find(self.version)
+            .ok_or_else(|| Error::NoSuchVersion {
+                ver: self.version,
+                latest: manifest.max_ver().unwrap_or(self.version),
+            })?;
+        let content = store.content_for(record)?;
+        crate::apply::write_target(target, &content)
+    }
 }
 
 impl Store {
@@ -200,12 +213,12 @@ impl Store {
 
     /// 路径 → 身份；缓存未命中时扫描清单并修复缓存。
     pub fn resolve(&mut self, path: &AbsPath) -> Result<Option<FileId>> {
-        let key = path.as_path().to_string_lossy().into_owned();
+        let key = path.key();
         let cached = self.index_cache().entries.get(&key).copied();
 
         if let Some(id) = cached {
             match self.load_manifest_optional(id)? {
-                Some(manifest) if manifest.path == *path => return Ok(Some(id)),
+                Some(manifest) if manifest.path.key() == key => return Ok(Some(id)),
                 _ => {
                     self.index_cache().entries.remove(&key);
                 }
@@ -214,7 +227,7 @@ impl Store {
 
         for id in self.list_ids()? {
             let manifest = self.manifest(id)?;
-            if manifest.path == *path {
+            if manifest.path.key() == key {
                 self.index_cache().entries.insert(key, id);
                 return Ok(Some(id));
             }
@@ -236,6 +249,28 @@ impl Store {
     /// 读取对象内容。
     pub fn content(&self, hash: BlobHash) -> Result<Vec<u8>> {
         self.objects.get(hash)
+    }
+
+    /// 按版本记录声明的编码读取内容。
+    pub fn content_for(&self, record: &VersionRecord) -> Result<Vec<u8>> {
+        match record.codec {
+            Codec::Deflate => self.objects.get(record.blob),
+        }
+    }
+
+    /// 为已存在的版本构造写回句柄。
+    pub fn committed(&self, id: FileId, version: Ver) -> Result<Committed> {
+        let manifest = self.manifest(id)?;
+        let record = manifest.find(version).ok_or_else(|| Error::NoSuchVersion {
+            ver: version,
+            latest: manifest.max_ver().unwrap_or(version),
+        })?;
+        Ok(Committed {
+            id,
+            version,
+            source: record.source,
+            trim_failed: false,
+        })
     }
 
     /// 最新版本记录。
@@ -423,7 +458,7 @@ impl Store {
     /// 只改路径映射，不动磁盘文件。
     pub fn rename(&mut self, id: FileId, new_path: AbsPath) -> Result<()> {
         let mut manifest = self.manifest(id)?;
-        if manifest.path == new_path {
+        if manifest.path.key() == new_path.key() {
             return Ok(());
         }
         if self.resolve(&new_path)?.is_some() {
@@ -433,7 +468,7 @@ impl Store {
         manifest.path = new_path;
         self.save_manifest(&manifest)?;
 
-        let keep = manifest.path.as_path().to_string_lossy().into_owned();
+        let keep = manifest.path.key();
         let stale: Vec<String> = self
             .index_cache()
             .entries
@@ -459,8 +494,29 @@ impl Store {
     ///
     /// `dry_run` 只报告，不移动对象、不写清单。调用方必须持有排他锁。
     pub fn prune(&mut self, ids: &[FileId], dry_run: bool) -> Result<PruneReport> {
-        let mut manifests = std::collections::BTreeMap::new();
-        for id in self.list_ids()? {
+        let all_ids = self.list_ids()?;
+        let selected: BTreeSet<FileId> = ids.iter().copied().collect();
+        let mut selected_manifests = BTreeMap::new();
+        for id in &all_ids {
+            if selected.contains(id) {
+                selected_manifests.insert(*id, self.manifest(*id)?);
+            }
+        }
+
+        let needs_trim = selected_manifests.values().any(|manifest| {
+            let limit = manifest.effective_max_versions(self.default_max_versions);
+            limit > 0 && manifest.versions.len() > limit as usize
+        });
+        if !needs_trim {
+            if !dry_run && selected.len() == all_ids.len() {
+                // 全库 prune 仍负责回收崩溃留下的孤儿。
+                self.reclaim_orphans()?;
+            }
+            return Ok(PruneReport::default());
+        }
+
+        let mut manifests = BTreeMap::new();
+        for id in all_ids {
             manifests.insert(id, self.manifest(id)?);
         }
 
@@ -620,7 +676,7 @@ impl Store {
     }
 
     fn remember(&mut self, manifest: &Manifest) {
-        let key = manifest.path.as_path().to_string_lossy().into_owned();
+        let key = manifest.path.key();
         let entry = self.index_cache().entries.get(&key).copied();
         if entry == Some(manifest.id) {
             return;
@@ -657,7 +713,7 @@ impl Store {
         else {
             return Ok(());
         };
-        let content = self.objects.get(pending.blob)?;
+        let content = self.content_for(&pending)?;
         let current = read_recovery_target(&manifest.path)?;
         let current_hash = current.as_ref().map(|bytes| hash_bytes(bytes));
 
@@ -1337,6 +1393,25 @@ mod tests {
             .unwrap();
         assert!(report.ok());
         assert!(store.orphan_hashes().unwrap().is_empty());
+    }
+
+    #[test]
+    fn prune_without_trim_does_not_read_other_manifests() {
+        let (_temporary, mut store) = open_store();
+        let first = path("first");
+        let second = path("second");
+        let first_commit = {
+            let prepared = store.prepare_track(&first, b"one").unwrap();
+            store.commit(prepared, None).unwrap()
+        };
+        let second_commit = {
+            let prepared = store.prepare_track(&second, b"two").unwrap();
+            store.commit(prepared, None).unwrap()
+        };
+
+        fs::write(store.manifest_path(second_commit.id()).as_path(), b"{").unwrap();
+        let report = store.prune(&[first_commit.id()], false).unwrap();
+        assert!(report.files.is_empty());
     }
 
     #[test]

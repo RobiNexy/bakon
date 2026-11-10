@@ -31,13 +31,13 @@
 | V1-4 | 恢复覆盖外部编辑 | 已修复 | `.pending` 记录新旧哈希，外部内容记为 `salvage` |
 | V1-5 | `verify --fix` 索引假成功 | 已修复 | `save_index` 返回 `Result`，写入失败返回 8 |
 | V1-6 | `verify` 不校验时间与连续性 | 已修复 | `Manifest::validate` 校验 RFC 3339 与连续版本号 |
-| V1-7 | 类型签名未承载 `S_2`/`S_6` | 仍存在 | `apply::write_target` 仍是自由函数，`Ver::new`/`FileId::from_bytes` 仍公开 |
+| V1-7 | 类型签名未承载 `S_2`/`S_6` | 已修复（写回与构造入口） | `Committed::apply` 是唯一公开写回入口；`apply::write_target` 为 crate 内；`Ver::next`/`Ver::new`、`FileId::from_bytes` 已收紧 |
 | V1-8 | 读命令共享锁写索引 | 已修复 | `resolve` 不再写索引；`verify --fix` 负责重建 |
-| V1-9 | 路径身份与内核不一致 | 仍存在 | 符号链接 `..` 仍被词法折叠；大小写未归一化 |
+| V1-9 | 路径身份与内核不一致 | 已修复（Linux 路径） | 经过符号链接的 `..` 返回用法错误；`AbsPath::key` 归一化大小写 |
 | V1-10 | 非 UTF-8 路径晚失败并留孤儿 | 已修复 | `AbsPath::new` 返回用法错误，对象未写入 |
-| V1-11 | `prune` 成本随全库增长 | 仍存在 | 仍加载全部清单并计数 |
+| V1-11 | `prune` 成本随全库增长 | 部分修复 | 无删除的单文件 `prune` 只读目标清单；实际裁剪仍需全局引用扫描 |
 | V1-12 | CLI 契约与 JSON 输出缺口 | 已修复 | 新增 `ls`/`path`/`store`；空 `prune` 输出 JSON |
-| V1-13 | `codec` 不参与读取分派 | 仍存在 | `Store::content` 仍只接受哈希并固定解压 deflate |
+| V1-13 | `codec` 不参与读取分派 | 已修复 | `Store::content_for` 按 `VersionRecord.codec` 分派 |
 | V1-14 | 写回竞态映射为 3 | 已修复 | `applied` 把 `NotAFile` 映射为 `ApplyFailed`（7） |
 
 ## 4. 交叉论证
@@ -62,15 +62,15 @@
 
 ### 4.4 类型承载
 
-前次的类型差距没有变化。`Committed` 仍只有访问器，`apply::write_target` 仍可从任意调用点调用，`Ver::new` 与 `FileId::from_bytes` 仍是公开构造入口。因此 $\mathbf{P_5}$ 仍不成立。这是设计声明与实现签名之间的差距，不是当前命令路径的行为错误。
+写回入口已经收敛：`apply::write_target` 是 crate 内函数，外部只能通过 `Committed::apply` 写回；`Ver::new`、`Ver::next` 与 `FileId::from_bytes` 不再是公开构造入口，`Ver::parse` 明确表示“外部查找输入”。因此 $\mathbf{S_6}$ 的写回部分由类型承载。剩余缺口是 `commit` 的写锁仍是调用点约定，而不是签名参数；本报告把这一点记为类型系统的残余，而不是运行时缺陷。
 
 ### 4.5 成本、路径与输出
 
-`prune` 仍先读取全部清单并对全部版本计数；修复后的 `reclaim_orphans` 还会扫描全部对象，因此 $\mathbf{P_6}$ 仍不成立，且成本比前次更高。
+`prune` 先只读取目标清单；没有版本可删的单文件 `prune` 不扫描全库。实际发生裁剪时，仍需要一次全库引用扫描来判断对象是否共享；这是候选计算的 CPU 成本，不是持久化片段。$\mathbf{P_6}$ 的持久化片段部分成立，命令级成本在裁剪路径上仍与全库版本数相关。
 
-`AbsPath` 仍是词法清理；符号链接 `link/../x` 仍编辑词法结果 `x`，而不是内核结果。大小写不敏感平台仍未做路径键归一化。$\mathbf{P_7}$ 仍不成立。
+`AbsPath::new` 拒绝经过符号链接的 `..`，`AbsPath::key` 在 Windows/macOS 上做大小写归一化；`link/../x` 不再被词法折叠到另一个文件。$\mathbf{P_7}$ 在 Linux 上成立；跨平台大小写行为仍需在对应 runner 上验证。
 
-`prune` 的空结果现在按格式输出；`ls`/`path`/`store` 已实现，$\mathbf{P_8}$ 成立。
+`Store::content_for` 按 `VersionRecord.codec` 分派；`prune` 的空结果按格式输出；`ls`/`path`/`store` 已实现，$\mathbf{P_8}$ 成立。
 
 ## 5. 反例与边界
 
@@ -79,34 +79,33 @@
 | 编号 | 操作 | 观测 | 结论 |
 |---|---|---|---|
 | R1 | `max_versions=2`，连续 5 次提交 | 对象数 2，引用数 2；`verify` 返回 0 | V1-1 修复 |
-| R2 | 在 `prune` 的清单写入后崩溃，重跑 `prune` | 崩溃时对象 4；重跑后对象 2 | V1-1 修复 |
+| R2 | 在 `prune` 的清单写入后崩溃，执行 `verify --fix` | 崩溃时对象 4；修复后对象 2 | V1-1 修复 |
 | R3 | `BAKON_TEST_CRASH_AFTER=1 init` 后再次 `init` | 第一次 137；第二次 0，标记存在 | V1-2 修复 |
 | R4 | 回退写入 pending 后崩溃，执行 `verify` | 返回 6，报告 `.pending` 与 `pending_apply`；`verify --fix` 返回 0 并写回目标 | V1-3 修复 |
 | R5 | 崩溃后手写目标为 `external`，执行 `verify --fix` | 目标为 `one`；日志出现 `salvage` 大小为 8 与新 `revert` | V1-4 修复 |
 | R7 | 用目录替换 `index.json`，执行 `verify --fix` | 返回 8，不再报告 `[fixed]` | V1-5 修复 |
 | R8 | 清单 `time=not-a-time` | `verify` 返回 6，指出版本与非法时间 | V1-6 修复 |
 | R9 | 非 UTF-8 文件名执行 `edit` | 返回 2；`objects/` 为 0 | V1-10 修复 |
-| R10 | 路径 `link/../x`，`link` 指向 `real/` | 编辑 `targetdir/x`，`real/x` 未变 | V1-9 仍存在 |
+| R10 | 路径 `link/../x`，`link` 指向 `real/` | 返回用法错误 2，两个文件都未修改 | V1-9 修复 |
 | R11 | 删除 `index.json` 后执行 `log` | `log` 成功，索引未重建 | V1-8 修复 |
 | R12 | `--format json prune` 无可裁剪版本 | 输出 `{"dry_run":false,"files":[]}` | V1-12 修复 |
 | R13 | `ls`、`path`、`store path`、`store size` | 均返回 0，输出符合格式 | V1-12 修复 |
 
-V1-7、V1-11、V1-13 没有运行时反例，结论来自签名与代码路径；它们的风险是设计承诺不成立，而不是当前命令产生错误数据。
+V1-7 的写回与构造入口已收敛；V1-11 的剩余部分是实际裁剪时的全局引用扫描；V1-13 已按条目分派。当前没有前次 P1 的运行时反例。
 
 ## 6. 落地指导
 
 | 发现 | 修改 | 验证 |
 |---|---|---|
-| V1-7 | 将 `Ver::new` 改为语义明确的 `Ver::from_external` 或收紧；`FileId::from_bytes` 改为测试专用；把写回收敛到 `Committed::apply`；写接口要求 `&WriteGuard` | `trybuild` 编译失败用例 |
-| V1-9 | 定义平台路径键；Windows/macOS 默认大小写折叠；对符号链接下的 `..` 采用内核解析或拒绝该输入 | Windows 两种大小写只产生一个清单；`link/../x` 与 shell 一致 |
-| V1-11 | `prune` 只读取目标清单；候选回收使用全局引用计数或一次全库扫描，避免重复加载全部清单 | 构造大量其他版本，测量 `prune <file>` 不随全库版本线性增长 |
-| V1-13 | `Store::content` 改为接收 `VersionRecord` 并按 `codec` 分派，或删除 `codec` 字段 | 未来 codec 的单元测试，或删除扩展性承诺 |
+| V1-7 残余 | `commit`/`prune`/`rename` 仍未要求 `&StoreLock` 参数；把写接口改为显式接收锁守卫 | `trybuild` 编译失败用例：未持锁调用写接口不通过 |
+| V1-9 残余 | 在 Windows/macOS runner 上验证大小写折叠；确认大小写敏感卷是否需要运行时探测 | 两种拼写只产生一个清单；大小写敏感卷不误合并 |
+| V1-11 残余 | 若要让实际裁剪也达到 $O(k)$，需要持久化引用计数；否则保持当前“持久化片段 $O(k)$ + 全局扫描”的表述 | 构造大量其他版本，测量“无删除”与“有删除”两条路径 |
 
 ## 7. 独立校验
 
 ### 7.1 已执行
 
-- `cargo test --workspace --all-targets`：117 个测试通过（core 55、regressions 13、cli 集成 35、cli 单元 7、crash 6、concurrency 1）。
+- `cargo test --workspace --all-targets`：119 个测试通过（core 57、regressions 13、cli 集成 35、cli 单元 7、crash 6、concurrency 1）。
 - `cargo clippy --workspace --all-targets -- -D warnings`：通过。
 - `cargo fmt --all --check`：通过。
 - R1 至 R5 与 R7 至 R13 的反例均以真实二进制与隔离存储复现。
@@ -114,7 +113,7 @@ V1-7、V1-11、V1-13 没有运行时反例，结论来自签名与代码路径�
 ### 7.2 未覆盖
 
 - Windows 与 macOS 的大小写不敏感与 Unicode 归一化未在对应 runner 上构造反例；V1-9 的大小写部分仍是静态结论。
-- V1-7 的类型收紧尚未实现；当前结论是签名层结论。
+- `commit` 的写锁守卫仍是调用点约定；`trybuild` 编译失败用例尚未加入。
 - 大规模 `prune` 成本只由代码路径推断，未做 $10^5$ 量级测量。
 - 恢复时目标被删除（而非改写）的语义仍是 `[待确认]`：当前实现写回 pending 内容，不记录删除事件。
 

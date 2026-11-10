@@ -112,7 +112,7 @@ impl Store {
         let mut unique_hashes: BTreeSet<BlobHash> = BTreeSet::new();
 
         for (id, manifest) in &manifests {
-            let key = manifest.path.as_path().to_string_lossy().into_owned();
+            let key = manifest.path.key();
             if let Some(existing) = paths.insert(key, *id) {
                 report.items.push(VerifyItem {
                     kind: "duplicate_path",
@@ -145,7 +145,7 @@ impl Store {
                     Err(error) => return Err(Error::Io(error)),
                 }
 
-                match self.objects().get(record.blob) {
+                match self.content_for(record) {
                     Ok(content) => {
                         if content.len() as u64 != record.size {
                             report.items.push(VerifyItem {
@@ -193,7 +193,7 @@ impl Store {
 
         let expected: BTreeMap<String, FileId> = manifests
             .iter()
-            .map(|(id, manifest)| (manifest.path.as_path().to_string_lossy().into_owned(), *id))
+            .map(|(id, manifest)| (manifest.path.key(), *id))
             .collect();
         if self.load_index().entries != expected {
             let fixed = options.fix;

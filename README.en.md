@@ -30,7 +30,7 @@ target/release/bakon version
 cargo install --path crates/bakon
 ```
 
-The v1 release pipeline is not wired up yet; build from source for now.
+The v1 release workflow lives in `.github/workflows/release.yml` and builds seven targets with cargo and cross; it has not yet been exercised on a real tag.
 
 ## Quick start
 

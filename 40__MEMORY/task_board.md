@@ -7,9 +7,8 @@
 > 审计来源：[[design-audit-2026-11-10]]、[[design-audit-v1-2026-11-10]]、[[design-audit-v1-2026-11-10-recheck]]；v1 设计入口：[[MODULE__bakon-v1-design]]。
 
 - P1 v1 M3 剩余：Windows 钩子与并发用例、7 个目标的可链接产物（[[MODULE__bakon-v1-design]] §10）
-- P1 v1 发布路径：用 cargo 产物建立 Release 工作流，并演练一次回滚（[[AGENT__procedure__change-path]]）
-- P2 v1 复审 V1-7：Ver/FileId 与写回顺序的不变量未由类型签名承载（[[design-audit-v1-2026-11-10]]）
-- P2 v1 复审 V1-9：大小写与符号链接 `..` 的路径身份未归一化（[[design-audit-v1-2026-11-10]]）
-- P2 v1 复审 V1-11：prune 仍扫描全库版本，成本不满足定理 4（[[design-audit-v1-2026-11-10]]）
-- P3 v1 复审 V1-13：`codec` 字段不参与读取分派（[[design-audit-v1-2026-11-10]]）
+- P1 v1 发布路径：验证 cargo Release 工作流（`.github/workflows/release.yml`）并演练一次回滚（[[AGENT__procedure__change-path]]）
+- P2 v1 复审残余：`commit`/`prune`/`rename` 仍以调用点约定写锁，未由类型守卫（[[design-audit-v1-2026-11-10-recheck]]）
+- P2 v1 复审残余：Windows/macOS 的大小写路径键未在真实 runner 上验证（[[design-audit-v1-2026-11-10-recheck]]）
+- P2 v1 复审残余：实际裁剪仍需全局引用扫描，若要 $O(k)$ 需持久化引用计数（[[design-audit-v1-2026-11-10-recheck]]）
 - P2 决定是否为旧存储提供 feature-gated 迁移工具（`legacy-git`）

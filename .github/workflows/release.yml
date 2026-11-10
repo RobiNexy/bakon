@@ -1,0 +1,127 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            platform: linux-amd64
+            cross: false
+          - target: aarch64-unknown-linux-gnu
+            platform: linux-arm64
+            cross: true
+          - target: armv7-unknown-linux-gnueabihf
+            platform: linux-armv7
+            cross: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install target
+        run: rustup target add ${{ matrix.target }}
+      - name: Install cross
+        if: matrix.cross
+        run: cargo install cross --locked
+      - name: Build
+        run: |
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            cross build --release -p bakon --target "${{ matrix.target }}"
+          else
+            cargo build --release -p bakon --target "${{ matrix.target }}"
+          fi
+      - name: Package
+        run: |
+          name="bakon_${GITHUB_REF_NAME}_${{ matrix.platform }}"
+          mkdir -p "dist/$name"
+          cp "target/${{ matrix.target }}/release/bakon" "dist/$name/"
+          tar -czf "dist/$name.tar.gz" -C dist "$name"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform }}
+          path: dist/*.tar.gz
+
+  macos:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-13
+            target: x86_64-apple-darwin
+            platform: darwin-amd64
+          - os: macos-14
+            target: aarch64-apple-darwin
+            platform: darwin-arm64
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install target
+        run: rustup target add ${{ matrix.target }}
+      - name: Build
+        run: cargo build --release -p bakon --target ${{ matrix.target }}
+      - name: Package
+        run: |
+          name="bakon_${GITHUB_REF_NAME}_${{ matrix.platform }}"
+          mkdir -p "dist/$name"
+          cp "target/${{ matrix.target }}/release/bakon" "dist/$name/"
+          tar -czf "dist/$name.tar.gz" -C dist "$name"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform }}
+          path: dist/*.tar.gz
+
+  windows:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            platform: windows-amd64
+          - target: aarch64-pc-windows-msvc
+            platform: windows-arm64
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install target
+        run: rustup target add ${{ matrix.target }}
+      - name: Build
+        run: cargo build --release -p bakon --target ${{ matrix.target }}
+      - name: Package
+        shell: pwsh
+        run: |
+          $name = "bakon_${env:GITHUB_REF_NAME}_${{ matrix.platform }}"
+          New-Item -ItemType Directory -Force -Path "dist/$name" | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/bakon.exe" "dist/$name/bakon.exe"
+          Compress-Archive -Path "dist/$name" -DestinationPath "dist/$name.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform }}
+          path: dist/*.zip
+
+  release:
+    needs: [linux, macos, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: sha256sum dist/*.tar.gz dist/*.zip > dist/checksums.txt
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/checksums.txt
+          generate_release_notes: true

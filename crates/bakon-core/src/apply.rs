@@ -12,7 +12,7 @@ use crate::types::AbsPath;
 use crate::{Error, Result};
 
 /// 把内容写回目标；只修改内容，不替换文件本身。
-pub fn write_target(path: &AbsPath, content: &[u8]) -> Result<()> {
+pub(crate) fn write_target(path: &AbsPath, content: &[u8]) -> Result<()> {
     match fs::metadata(path.as_path()) {
         Ok(metadata) if metadata.is_file() => write_existing(path, content),
         Ok(_) => Err(Error::NotAFile { path: path.clone() }),

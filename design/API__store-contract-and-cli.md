@@ -15,7 +15,7 @@ pub struct BlobHash([u8; 32]);    // 内容哈希
 
 - `FileId` 不能从路径构造，只能由 `FileId::generate()` 产生并通过唯一性检查写入。
 - `Ver::next(head)` 是唯一的递增方式；不存在「从字符串解析版本号」的入口。
-- `AbsPath` 在构造时完成 `Clean` 与绝对化，不做符号链接解析（保留链接语义）。
+- `AbsPath` 在构造时绝对化、拒绝经过符号链接的 `..`，并做词法清理；最终目标的符号链接保留。大小写不敏感平台用路径键比较身份。
 - 四个类型之间没有隐式转换，编译期阻止混用。
 
 ```rust
@@ -44,7 +44,7 @@ impl Store {
 
 impl Committed {
     /// 只有已提交的版本才能写回目标文件（M2）。
-    pub fn apply(self, target: &AbsPath, policy: ApplyPolicy) -> Result<()>;
+    pub fn apply(self, store: &Store, target: &AbsPath) -> Result<()>;
 }
 ```
 

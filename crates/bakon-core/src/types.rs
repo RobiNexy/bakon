@@ -4,6 +4,7 @@
 //! 混用。约束见 `design/API__store-contract-and-cli.md` §1。
 
 use std::fmt;
+use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -15,7 +16,7 @@ use crate::{Error, Result};
 pub struct AbsPath(PathBuf);
 
 impl AbsPath {
-    /// 把任意路径绝对化并清理 `.`/`..`；不接触文件系统（`current_dir` 除外）。
+    /// 把任意路径绝对化并清理 `.`/`..`；拒绝经过符号链接的 `..`，不解析最终目标。
     pub fn new(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         let absolute = if path.is_absolute() {
@@ -23,6 +24,7 @@ impl AbsPath {
         } else {
             std::env::current_dir().map_err(Error::Io)?.join(path)
         };
+        reject_symlinked_parent_traversal(&absolute)?;
         let cleaned = clean(&absolute);
         if !cleaned.is_absolute() {
             return Err(Error::Internal(format!(
@@ -45,6 +47,16 @@ impl AbsPath {
 
     pub fn as_path(&self) -> &Path {
         &self.0
+    }
+
+    /// 路径身份键：大小写不敏感平台做小写归一化；Linux 保留原样。
+    pub fn key(&self) -> String {
+        let text = self.0.to_string_lossy().into_owned();
+        if cfg!(any(windows, target_os = "macos")) {
+            text.to_lowercase()
+        } else {
+            text
+        }
     }
 }
 
@@ -80,6 +92,40 @@ impl<'de> Deserialize<'de> for AbsPath {
     }
 }
 
+/// `..` 只有在它前面的路径不经过符号链接时才能按词法折叠；
+/// 否则内核解析结果会指向另一个文件，必须在进入存储前拒绝。
+fn reject_symlinked_parent_traversal(path: &Path) -> Result<()> {
+    let mut prefix = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                match fs::symlink_metadata(&prefix) {
+                    Ok(metadata) if metadata.file_type().is_symlink() => {
+                        return Err(Error::Usage(format!(
+                            "path traverses a symbolic link before '..': {}",
+                            path.display()
+                        )));
+                    }
+                    Ok(_) => {
+                        let canonical = fs::canonicalize(&prefix).map_err(Error::Io)?;
+                        if canonical != prefix {
+                            return Err(Error::Usage(format!(
+                                "path traverses a symbolic link before '..': {}",
+                                path.display()
+                            )));
+                        }
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(Error::Io(error)),
+                }
+                prefix.pop();
+            }
+            other => prefix.push(other.as_os_str()),
+        }
+    }
+    Ok(())
+}
+
 /// 词法清理：去掉 `.`，折叠 `..`，不解析符号链接。
 fn clean(path: &Path) -> PathBuf {
     let mut cleaned = PathBuf::new();
@@ -107,10 +153,10 @@ impl FileId {
         Self(uuid::v4_bytes())
     }
 
-    pub fn from_bytes(bytes: [u8; 16]) -> Self {
+    #[cfg(test)]
+    pub(crate) fn from_bytes(bytes: [u8; 16]) -> Self {
         Self(bytes)
     }
-
     pub fn as_bytes(&self) -> &[u8; 16] {
         &self.0
     }
@@ -153,13 +199,18 @@ impl Ver {
     /// 首个版本号。
     pub const ZERO: Self = Self(0);
 
-    /// 由外部输入（命令行参数或反序列化）构造；不作为生成新版本的入口。
-    pub fn new(value: u32) -> Result<Self> {
+    /// 由外部输入（命令行参数）构造，仅用于版本查找。
+    pub fn parse(value: u32) -> Result<Self> {
+        Ok(Self(value))
+    }
+
+    /// 内部构造：反序列化与测试；不用于生成新版本。
+    pub(crate) fn new(value: u32) -> Result<Self> {
         Ok(Self(value))
     }
 
     /// 唯一的递增方式。
-    pub fn next(head: Self) -> Result<Self> {
+    pub(crate) fn next(head: Self) -> Result<Self> {
         head.0
             .checked_add(1)
             .map(Self)
@@ -306,6 +357,20 @@ mod tests {
     fn parent_at_root_stays_at_root() {
         let path = AbsPath::new("/../..").unwrap();
         assert_eq!(path.as_path(), Path::new("/"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_parent_traversal_is_refused() {
+        let temporary = std::env::temp_dir().join(format!("bakon-path-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temporary);
+        std::fs::create_dir_all(temporary.join("real")).unwrap();
+        std::fs::write(temporary.join("real/x"), b"x").unwrap();
+        std::os::unix::fs::symlink(temporary.join("real"), temporary.join("link")).unwrap();
+
+        let error = AbsPath::new(temporary.join("link/../x")).unwrap_err();
+        assert!(matches!(error, Error::Usage(_)));
+        std::fs::remove_dir_all(&temporary).unwrap();
     }
 
     #[test]

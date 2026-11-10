@@ -1,6 +1,6 @@
 //! 命令实现：I/O、输出格式与事务编排。语义判断全部委托给 `bakon-core`。
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::io::{self, Write};
@@ -8,7 +8,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use std::time::Duration;
 
-use bakon_core::apply;
 use bakon_core::manifest::{Manifest, Source, VersionRecord};
 use bakon_core::object::hash_bytes;
 use bakon_core::store::{Committed, VerifyOptions};
@@ -123,7 +122,7 @@ pub fn edit(cli: &Cli, file: &Path, no_hook: bool) -> Result<u8> {
 /// `revert`：恢复一个已记录版本，并把恢复本身记为新的 `revert` 版本。
 pub fn revert(cli: &Cli, file: &Path, version: u32, force: bool, no_hook: bool) -> Result<u8> {
     let path = AbsPath::new(file)?;
-    let ver = Ver::new(version)?;
+    let ver = Ver::parse(version)?;
     let mut store = open_store(cli)?;
     let timeout = lock_timeout(cli);
 
@@ -170,7 +169,9 @@ pub fn revert(cli: &Cli, file: &Path, version: u32, force: bool, no_hook: bool) 
         })?;
 
         if head.blob == target.blob {
-            apply::write_target(&path, &target_content)
+            store
+                .committed(id, head.ver)?
+                .apply(&store, &path)
                 .map_err(|error| applied(error, head.ver))?;
             (None, manifest, previous)
         } else {
@@ -187,7 +188,8 @@ pub fn revert(cli: &Cli, file: &Path, version: u32, force: bool, no_hook: bool) 
             store.begin_apply(id, pending_version, old_blob, new_blob)?;
             let committed = store.commit(prepared, Some(head.ver))?;
             warn_trim(&committed);
-            apply::write_target(&path, &target_content)
+            committed
+                .apply(&store, &path)
                 .map_err(|error| applied(error, committed.version()))?;
             store.finish_apply(id)?;
             let manifest = store.manifest(id)?;
@@ -545,11 +547,12 @@ pub fn log(cli: &Cli, file: &Path) -> Result<u8> {
 pub fn ls(cli: &Cli) -> Result<u8> {
     let store = open_store(cli)?;
     let _guard = store.lock_shared(lock_timeout(cli))?;
-    let mut paths = BTreeSet::new();
+    let mut paths = BTreeMap::new();
     for id in store.all_ids()? {
-        paths.insert(store.manifest(id)?.path);
+        let path = store.manifest(id)?.path;
+        paths.insert(path.key(), path);
     }
-    for path in paths {
+    for path in paths.into_values() {
         match cli.format {
             Format::Human | Format::Plain => emit(&path.as_path().to_string_lossy())?,
             Format::Json => {
@@ -666,7 +669,7 @@ pub fn show(cli: &Cli, file: &Path, version: u32) -> Result<u8> {
     let _guard = store.lock_shared(lock_timeout(cli))?;
     let id = store.resolve(&path)?.ok_or(Error::NotManaged(path))?;
     let manifest = store.manifest(id)?;
-    let record = find_version(&manifest, Ver::new(version)?)?;
+    let record = find_version(&manifest, Ver::parse(version)?)?;
     let content = store.content(record.blob)?;
 
     let mut stdout = io::stdout().lock();
@@ -694,10 +697,10 @@ pub fn diff(cli: &Cli, file: &Path, first: Option<u32>, second: Option<u32>) -> 
             (previous_version(&manifest, newer)?, newer)
         }
         (Some(newer), None) => {
-            let newer = Ver::new(newer)?;
+            let newer = Ver::parse(newer)?;
             (previous_version(&manifest, newer)?, newer)
         }
-        (Some(older), Some(newer)) => (Ver::new(older)?, Ver::new(newer)?),
+        (Some(older), Some(newer)) => (Ver::parse(older)?, Ver::parse(newer)?),
         (None, Some(_)) => {
             return Err(Error::Usage("a second version cannot stand alone".into()));
         }
