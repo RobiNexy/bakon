@@ -158,6 +158,7 @@ BAKON_HOOK=1     防止钩子递归调用
 
 - 设计入口：[`design/MODULE__bakon-v1-design.md`](design/MODULE__bakon-v1-design.md)
 - 状态机、数据格式、写入协议与 CLI 契约见 [`design/`](design/)
+- v1 设计与实现的再次形式化审计：[`docs/design-audit-v1-2026-11-10.md`](docs/design-audit-v1-2026-11-10.md)
 - 0.x 的形式化审计（历史证据）：[`docs/design-audit-2026-11-10.md`](docs/design-audit-2026-11-10.md)
 
 ## License

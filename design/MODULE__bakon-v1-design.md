@@ -26,6 +26,7 @@
 | 归属、恢复、备份、迁移 | [[OPS__store-identity-recovery-and-retention]] |
 | 接口、CLI、退出码 | [[API__store-contract-and-cli]] |
 | 重构前的缺陷清单 | [[design-audit-2026-11-10]] |
+| v1 设计与实现的再次形式化审计 | [[design-audit-v1-2026-11-10]] |
 
 ## 3. 架构
 
