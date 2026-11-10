@@ -6,6 +6,7 @@
 mod clock;
 mod fsutil;
 
+pub mod apply;
 pub mod error;
 pub mod manifest;
 pub mod object;

@@ -26,6 +26,8 @@ pub enum Error {
     NoPreviousVersion { ver: Ver },
     /// 请求的版本已被裁剪。
     Pruned { ver: Ver, oldest: Ver },
+    /// 目标路径已被纳管。
+    AlreadyManaged { path: AbsPath },
     /// 等待存储锁超时。
     LockTimeout {
         holder: Option<u32>,
@@ -66,7 +68,10 @@ impl Error {
             | Self::NoSuchVersion { .. }
             | Self::NoPreviousVersion { .. }
             | Self::Pruned { .. } => 3,
-            Self::LockTimeout { .. } | Self::Diverged { .. } | Self::HeadChanged { .. } => 4,
+            Self::LockTimeout { .. }
+            | Self::Diverged { .. }
+            | Self::HeadChanged { .. }
+            | Self::AlreadyManaged { .. } => 4,
             Self::HookFailed { .. } | Self::EditorFailed { .. } => 5,
             Self::NotAStore { .. }
             | Self::SchemaTooNew { .. }
@@ -119,6 +124,9 @@ impl fmt::Display for Error {
                     "{} diverged from the recorded version: {hint}",
                     path.as_path().display()
                 )
+            }
+            Self::AlreadyManaged { path } => {
+                write!(f, "already managed: {}", path.as_path().display())
             }
             Self::HeadChanged { expected, actual } => write!(
                 f,
@@ -236,6 +244,7 @@ mod tests {
                 },
                 4,
             ),
+            (Error::AlreadyManaged { path: path() }, 4),
             (
                 Error::HookFailed {
                     ver: Ver::new(1).unwrap(),

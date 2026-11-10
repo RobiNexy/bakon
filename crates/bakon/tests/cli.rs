@@ -351,3 +351,110 @@ fn editing_a_directory_exits_three() {
         stderr(&output)
     );
 }
+
+#[test]
+fn revert_restores_content_and_appends_a_version() {
+    let fixture = Fixture::new(b"one");
+    let editor = editor_script(
+        Path::new(fixture.store()).parent().unwrap(),
+        "printf 'two' > \"$1\"",
+    );
+    assert_eq!(fixture.edit(&editor).status.code(), Some(0));
+
+    let output = fixture.run(&["revert", fixture.file(), "0"]);
+
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    assert!(
+        stderr(&output).contains("as version 2"),
+        "stderr: {}",
+        stderr(&output)
+    );
+    assert_eq!(fs::read(&fixture.file).unwrap(), b"one");
+
+    let log = fixture.run(&["--format", "plain", "log", fixture.file()]);
+    let text = stdout(&log);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 3, "{text}");
+    assert!(
+        lines[0].starts_with("2\t") && lines[0].ends_with("\trevert"),
+        "{}",
+        lines[0]
+    );
+}
+
+#[test]
+fn revert_refuses_external_divergence_without_force() {
+    let fixture = Fixture::new(b"one");
+    let editor = editor_script(
+        Path::new(fixture.store()).parent().unwrap(),
+        "printf 'two' > \"$1\"",
+    );
+    assert_eq!(fixture.edit(&editor).status.code(), Some(0));
+    fs::write(&fixture.file, b"outside edit").unwrap();
+
+    let output = fixture.run(&["revert", fixture.file(), "0"]);
+
+    assert_eq!(output.status.code(), Some(4), "stderr: {}", stderr(&output));
+    assert!(
+        stderr(&output).contains("diverged"),
+        "stderr: {}",
+        stderr(&output)
+    );
+    assert_eq!(fs::read(&fixture.file).unwrap(), b"outside edit");
+}
+
+#[test]
+fn revert_force_records_salvage_before_restoring() {
+    let fixture = Fixture::new(b"one");
+    let editor = editor_script(
+        Path::new(fixture.store()).parent().unwrap(),
+        "printf 'two' > \"$1\"",
+    );
+    assert_eq!(fixture.edit(&editor).status.code(), Some(0));
+    fs::write(&fixture.file, b"outside edit").unwrap();
+
+    let output = fixture.run(&["revert", fixture.file(), "0", "--force"]);
+
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    assert_eq!(fs::read(&fixture.file).unwrap(), b"one");
+
+    let log = fixture.run(&["--format", "plain", "log", fixture.file()]);
+    let text = stdout(&log);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 4, "{text}");
+    assert!(lines[0].ends_with("\trevert"), "{}", lines[0]);
+    assert!(lines[1].ends_with("\tsalvage"), "{}", lines[1]);
+
+    let salvaged = fixture.run(&["show", fixture.file(), "2"]);
+    assert_eq!(salvaged.stdout, b"outside edit");
+}
+
+#[cfg(unix)]
+#[test]
+fn revert_preserves_a_symlink() {
+    let fixture = Fixture::new(b"one");
+    let target = fixture.file.clone();
+    let link = target.parent().unwrap().join("link.txt");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    let editor = editor_script(
+        Path::new(fixture.store()).parent().unwrap(),
+        "printf 'two' > \"$1\"",
+    );
+    let link_arg = link.to_str().unwrap();
+    let edited = run_with_env(
+        &["--store", fixture.store(), "edit", link_arg],
+        &[("EDITOR", &editor)],
+    );
+    assert_eq!(edited.status.code(), Some(0), "stderr: {}", stderr(&edited));
+
+    let output = fixture.run(&["revert", link_arg, "0"]);
+
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    assert!(
+        fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(fs::read(&target).unwrap(), b"one");
+}

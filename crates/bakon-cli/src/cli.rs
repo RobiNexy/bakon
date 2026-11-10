@@ -53,6 +53,22 @@ pub enum Command {
     Edit {
         /// File to edit
         file: PathBuf,
+        /// Skip the per-file hook
+        #[arg(long)]
+        no_hook: bool,
+    },
+    /// Restore a recorded version and record the restore as a new version
+    Revert {
+        /// Tracked file
+        file: PathBuf,
+        /// Version to restore
+        ver: u32,
+        /// Record the current divergent content as a salvage version first
+        #[arg(long)]
+        force: bool,
+        /// Skip the per-file hook
+        #[arg(long)]
+        no_hook: bool,
     },
     /// List recorded versions, newest first
     Log {

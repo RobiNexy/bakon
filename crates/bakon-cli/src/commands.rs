@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use std::time::Duration;
 
+use bakon_core::apply;
 use bakon_core::manifest::{Manifest, Source, VersionRecord};
 use bakon_core::object::hash_bytes;
 use bakon_core::{AbsPath, Error, Result, Store, Ver};
@@ -46,7 +47,7 @@ pub fn version(format: Format) -> Result<u8> {
 }
 
 /// `edit`：首次自动纳管；编辑器退出后按需提交。编辑器阶段不持锁。
-pub fn edit(cli: &Cli, file: &Path) -> Result<u8> {
+pub fn edit(cli: &Cli, file: &Path, no_hook: bool) -> Result<u8> {
     let path = AbsPath::new(file)?;
     let mut store = open_store(cli)?;
     let timeout = lock_timeout(cli);
@@ -87,16 +88,114 @@ pub fn edit(cli: &Cli, file: &Path) -> Result<u8> {
         return Ok(0);
     }
 
-    let _guard = store.begin_write(timeout)?;
-    if store.resolve(&path)? != Some(id) {
-        return Err(Error::Internal(format!(
-            "{} was re-tracked while the editor was open",
-            path
-        )));
+    let (committed, hook_manifest) = {
+        let _guard = store.begin_write(timeout)?;
+        if store.resolve(&path)? != Some(id) {
+            return Err(Error::Internal(format!(
+                "{} was re-tracked while the editor was open",
+                path
+            )));
+        }
+        let prepared = store.prepare_commit(id, &edited, Source::Edit)?;
+        let committed = store.commit(prepared, Some(head))?;
+        let manifest = store.manifest(id)?;
+        (committed, manifest)
+    };
+
+    if !no_hook {
+        run_hook(
+            &hook_manifest,
+            committed.version(),
+            Source::Edit,
+            Some(head),
+        )?;
     }
-    let prepared = store.prepare_commit(id, &edited, Source::Edit)?;
-    let committed = store.commit(prepared, Some(head))?;
     eprintln!("bakon: saved version {} of {}", committed.version(), path);
+    Ok(0)
+}
+
+/// `revert`：恢复一个已记录版本，并把恢复本身记为新的 `revert` 版本。
+pub fn revert(cli: &Cli, file: &Path, version: u32, force: bool, no_hook: bool) -> Result<u8> {
+    let path = AbsPath::new(file)?;
+    let ver = Ver::new(version)?;
+    let mut store = open_store(cli)?;
+    let timeout = lock_timeout(cli);
+
+    let (committed, hook_manifest, previous) = {
+        let _guard = store.begin_write(timeout)?;
+        let id = store
+            .resolve(&path)?
+            .ok_or(Error::NotManaged(path.clone()))?;
+        let manifest = store.manifest(id)?;
+        let target = find_version(&manifest, ver)?.clone();
+        let target_content = store.content(target.blob)?;
+
+        let head = manifest.head().cloned().ok_or_else(|| Error::Corrupt {
+            what: "manifest",
+            detail: format!("{id} has no versions"),
+        })?;
+        let current = read_if_exists(&path)?;
+        let diverged = current
+            .as_ref()
+            .is_some_and(|bytes| hash_bytes(bytes) != head.blob);
+
+        if diverged && !force {
+            return Err(Error::Diverged {
+                path,
+                hint: "target differs from the recorded head; use --force to record it as salvage first",
+            });
+        }
+
+        let mut previous = head.ver;
+        if diverged {
+            let content = current.expect("diverged implies content");
+            let salvage = store.prepare_commit(id, &content, Source::Salvage)?;
+            let salvaged = store.commit(salvage, Some(head.ver))?;
+            previous = salvaged.version();
+        }
+
+        let manifest = store.manifest(id)?;
+        let head = manifest.head().cloned().ok_or_else(|| Error::Corrupt {
+            what: "manifest",
+            detail: format!("{id} has no versions"),
+        })?;
+
+        if head.blob == target.blob {
+            apply::write_target(&path, &target_content)
+                .map_err(|error| applied(error, head.ver))?;
+            (None, manifest, previous)
+        } else {
+            store.begin_apply(id)?;
+            let mut prepared = store.prepare_commit(id, &target_content, Source::Revert)?;
+            prepared.set_pending(true);
+            let committed = store.commit(prepared, Some(head.ver))?;
+            apply::write_target(&path, &target_content)
+                .map_err(|error| applied(error, committed.version()))?;
+            store.finish_apply(id)?;
+            let manifest = store.manifest(id)?;
+            (Some(committed), manifest, previous)
+        }
+    };
+
+    match committed {
+        Some(committed) => {
+            if !no_hook {
+                run_hook(
+                    &hook_manifest,
+                    committed.version(),
+                    Source::Revert,
+                    Some(previous),
+                )?;
+            }
+            eprintln!(
+                "bakon: reverted {} to version {} as version {}",
+                path,
+                ver,
+                committed.version()
+            );
+        }
+        None => eprintln!("bakon: {} already matches version {}", path, ver),
+    }
     Ok(0)
 }
 
@@ -292,6 +391,74 @@ fn read_target(path: &AbsPath) -> Result<Vec<u8>> {
         return Err(Error::NotAFile { path: path.clone() });
     }
     fs::read(path.as_path()).map_err(Error::Io)
+}
+
+/// 读取目标文件；不存在返回 `None`，存在但不是普通文件返回 3。
+fn read_if_exists(path: &AbsPath) -> Result<Option<Vec<u8>>> {
+    match fs::metadata(path.as_path()) {
+        Ok(metadata) if metadata.is_file() => fs::read(path.as_path()).map(Some).map_err(Error::Io),
+        Ok(_) => Err(Error::NotAFile { path: path.clone() }),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            match fs::symlink_metadata(path.as_path()) {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    Err(Error::NotAFile { path: path.clone() })
+                }
+                Ok(_) => Ok(None),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(Error::Io(error)),
+            }
+        }
+        Err(error) => Err(Error::Io(error)),
+    }
+}
+
+/// 写回失败中属于环境问题的部分映射为退出码 7（版本已记录，但文件未更新）。
+fn applied(error: Error, ver: Ver) -> Error {
+    match error {
+        Error::Io(source) => Error::ApplyFailed { ver, source },
+        other => other,
+    }
+}
+
+/// 在锁外执行文件的变更钩子；至多一次，失败不回滚版本。
+fn run_hook(
+    manifest: &Manifest,
+    version: Ver,
+    source: Source,
+    previous: Option<Ver>,
+) -> Result<()> {
+    let Some(hook) = manifest.hook.as_deref() else {
+        return Ok(());
+    };
+    if env::var_os("BAKON_HOOK").is_some() {
+        eprintln!("bakon: hook skipped (already inside a hook)");
+        return Ok(());
+    }
+
+    let status = ProcessCommand::new("sh")
+        .arg("-c")
+        .arg(hook)
+        .env("BAKON_FILE", manifest.path.as_path())
+        .env("BAKON_VERSION", version.get().to_string())
+        .env("BAKON_SOURCE", source_name(source))
+        .env(
+            "BAKON_PREV",
+            previous
+                .map(|ver| ver.get().to_string())
+                .unwrap_or_default(),
+        )
+        .env("BAKON_HOOK", "1")
+        .status()
+        .map_err(Error::Io)?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(Error::HookFailed {
+            ver: version,
+            status: status.code().unwrap_or(-1),
+        })
+    }
 }
 
 fn run_editor(path: &AbsPath) -> Result<()> {

@@ -78,12 +78,16 @@ impl Manifest {
     }
 
     /// 生效上限：文件级配置优先，缺省取全局默认，`0` 表示不限制。
-    pub fn effective_max_versions(&self) -> u32 {
+    pub fn effective_max_versions(&self, global: u32) -> u32 {
         match self.retention {
-            Retention::Inherit => DEFAULT_MAX_VERSIONS,
+            Retention::Inherit => global,
             Retention::Unlimited => 0,
             Retention::Limit(limit) => limit.get(),
         }
+    }
+
+    pub fn head_mut(&mut self) -> Option<&mut VersionRecord> {
+        self.versions.last_mut()
     }
 
     /// schema 门与结构校验；任何不符都拒绝解析结果。
@@ -274,12 +278,16 @@ mod tests {
         manifest.retention = Retention::Limit(NonZeroU32::new(7).unwrap());
         let value = serde_json::to_value(&manifest).unwrap();
         assert_eq!(value["retention"]["max_versions"], 7);
-        assert_eq!(manifest.effective_max_versions(), 7);
+        assert_eq!(manifest.effective_max_versions(DEFAULT_MAX_VERSIONS), 7);
 
         manifest.retention = Retention::Inherit;
         let value = serde_json::to_value(&manifest).unwrap();
         assert!(value.get("retention").is_none());
-        assert_eq!(manifest.effective_max_versions(), DEFAULT_MAX_VERSIONS);
+        assert_eq!(
+            manifest.effective_max_versions(DEFAULT_MAX_VERSIONS),
+            DEFAULT_MAX_VERSIONS
+        );
+        assert_eq!(manifest.effective_max_versions(25), 25);
     }
 
     #[test]

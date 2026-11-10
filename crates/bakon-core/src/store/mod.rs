@@ -39,6 +39,7 @@ pub struct Store {
     marker: Marker,
     objects: ObjectStore,
     index: Option<IndexCache>,
+    default_max_versions: u32,
 }
 
 /// 已准备好、尚未持久化的提交。
@@ -55,6 +56,13 @@ impl Prepared {
 
     pub fn manifest(&self) -> &Manifest {
         &self.manifest
+    }
+
+    /// 标记最新版本为「已记录、待写回」。
+    pub fn set_pending(&mut self, pending: bool) {
+        if let Some(head) = self.manifest.head_mut() {
+            head.pending_apply = pending;
+        }
     }
 }
 
@@ -118,6 +126,7 @@ impl Store {
             marker,
             objects,
             index: None,
+            default_max_versions: crate::manifest::DEFAULT_MAX_VERSIONS,
         }
     }
 
@@ -132,6 +141,11 @@ impl Store {
 
     pub fn marker(&self) -> &Marker {
         &self.marker
+    }
+
+    /// 设置全局保留上限；`0` 表示不限制。缺省为 [`crate::manifest::DEFAULT_MAX_VERSIONS`]。
+    pub fn set_default_max_versions(&mut self, value: u32) {
+        self.default_max_versions = value;
     }
 
     /// 取得排他写锁，并执行恢复动作（清理暂存、检查待写回标记）。
@@ -224,7 +238,7 @@ impl Store {
             source,
         );
         manifest.append(record);
-        manifest.trim(manifest.effective_max_versions());
+        manifest.trim(manifest.effective_max_versions(self.default_max_versions));
         Ok(Prepared {
             manifest,
             content: content.to_vec(),
@@ -307,7 +321,7 @@ impl Store {
         Ok(Some(manifest))
     }
 
-    fn save_manifest(&self, manifest: &Manifest) -> Result<()> {
+    pub(crate) fn save_manifest(&self, manifest: &Manifest) -> Result<()> {
         let encoded = serde_json::to_vec_pretty(manifest)
             .map_err(|error| Error::Internal(format!("cannot encode manifest: {error}")))?;
         let files = self.root.join(FILES_DIR);
@@ -339,6 +353,11 @@ impl Store {
             }
         }
         Ok(ids.into_iter().collect())
+    }
+
+    /// 全部被管理文件的身份，按清单文件名排序。
+    pub fn all_ids(&self) -> Result<Vec<FileId>> {
+        self.list_ids()
     }
 
     fn index_cache(&mut self) -> &mut IndexCache {
@@ -377,14 +396,93 @@ impl Store {
     }
 
     fn recover(&self) -> Result<()> {
-        if self.root.join(PENDING_FILE).as_path().exists() {
-            return Err(Error::Corrupt {
-                what: PENDING_FILE,
-                detail: "a pending apply was found; recovery needs revert support".into(),
-            });
+        for id in self.read_pending()? {
+            let Some(mut manifest) = self.load_manifest_optional(id)? else {
+                continue;
+            };
+            let Some(head) = manifest.head().cloned() else {
+                continue;
+            };
+            if !head.pending_apply {
+                continue;
+            }
+            let content = self.objects.get(head.blob)?;
+            crate::apply::write_target(&manifest.path, &content).map_err(|error| match error {
+                Error::Io(source) => Error::ApplyFailed {
+                    ver: head.ver,
+                    source,
+                },
+                other => other,
+            })?;
+            if let Some(new_head) = manifest.head_mut() {
+                new_head.pending_apply = false;
+            }
+            self.save_manifest(&manifest)?;
         }
+        self.clear_pending()?;
         self.objects.cleanup_tmp()?;
         remove_dir_contents(self.root.join(TRASH_DIR).as_path())
+    }
+
+    fn pending_path(&self) -> AbsPath {
+        self.root.join(PENDING_FILE)
+    }
+
+    fn read_pending(&self) -> Result<Vec<FileId>> {
+        let text = match fs::read_to_string(self.pending_path().as_path()) {
+            Ok(text) => text,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(Error::Io(error)),
+        };
+        let mut ids = Vec::new();
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let Some(id) = FileId::from_hex(line) else {
+                return Err(Error::Corrupt {
+                    what: PENDING_FILE,
+                    detail: format!("invalid file id: {line}"),
+                });
+            };
+            ids.push(id);
+        }
+        Ok(ids)
+    }
+
+    fn write_pending(&self, ids: &[FileId]) -> Result<()> {
+        let mut text = String::new();
+        for id in ids {
+            text.push_str(&id.to_hex());
+            text.push('\n');
+        }
+        write_atomic(&self.pending_path(), &self.root, text.as_bytes())
+    }
+
+    fn clear_pending(&self) -> Result<()> {
+        match fs::remove_file(self.pending_path().as_path()) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(Error::Io(error)),
+        }
+    }
+
+    /// 标记一次写回开始；必须先于「pending=1 的清单提交」。
+    pub fn begin_apply(&self, id: FileId) -> Result<()> {
+        self.write_pending(&[id])
+    }
+
+    /// 写回成功后清除清单标记与 `.pending`。
+    pub fn finish_apply(&self, id: FileId) -> Result<()> {
+        let mut manifest = self.manifest(id)?;
+        if let Some(head) = manifest.head_mut()
+            && head.pending_apply
+        {
+            head.pending_apply = false;
+            self.save_manifest(&manifest)?;
+        }
+        self.clear_pending()
     }
 
     fn acquire(&self, exclusive: bool, timeout: Duration) -> Result<StoreLock> {
@@ -787,6 +885,41 @@ mod tests {
                 .unwrap()
                 .count(),
             0
+        );
+    }
+
+    #[test]
+    fn recovery_applies_a_pending_version() {
+        let temporary = TempDir::new().unwrap();
+        let root = temporary.path().join("store");
+        let (mut store, _) = Store::init(&root).unwrap();
+        let file = temporary.path().join("target");
+        fs::write(&file, b"old").unwrap();
+        let tracked = AbsPath::new(&file).unwrap();
+
+        let baseline = store.prepare_track(&tracked, b"old").unwrap();
+        let committed = store.commit(baseline, None).unwrap();
+
+        store.begin_apply(committed.id()).unwrap();
+        let mut prepared = store
+            .prepare_commit(committed.id(), b"restored", Source::Revert)
+            .unwrap();
+        prepared.set_pending(true);
+        store.commit(prepared, Some(Ver::ZERO)).unwrap();
+        drop(store);
+
+        let (store, _) = Store::init(&root).unwrap();
+        let _guard = store.begin_write(Duration::from_millis(50)).unwrap();
+
+        assert_eq!(fs::read(&file).unwrap(), b"restored");
+        assert!(!root.join(PENDING_FILE).exists());
+        assert!(
+            !store
+                .manifest(committed.id())
+                .unwrap()
+                .head()
+                .unwrap()
+                .pending_apply
         );
     }
 }

@@ -26,7 +26,13 @@ fn dispatch(cli: &Cli) -> Result<u8> {
     match &cli.command {
         Command::Init => commands::init(cli),
         Command::Version => commands::version(cli.format),
-        Command::Edit { file } => commands::edit(cli, file),
+        Command::Edit { file, no_hook } => commands::edit(cli, file, *no_hook),
+        Command::Revert {
+            file,
+            ver,
+            force,
+            no_hook,
+        } => commands::revert(cli, file, *ver, *force, *no_hook),
         Command::Log { file } => commands::log(cli, file),
         Command::Show { file, ver } | Command::Dump { file, ver } => {
             commands::show(cli, file, *ver)
