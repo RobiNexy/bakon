@@ -44,7 +44,7 @@ crates/
 
 依赖方向：`bakon` 依赖 `bakon-cli` 与 `bakon-core`；`bakon-cli` 依赖 `bakon-core`；`bakon-core` 不依赖任何上层，也不依赖终端类型。核心层可直接作为库使用，测试全部在无 TTY 环境下运行。
 
-依赖清单（全部纯 Rust）：`clap`（derive）、`serde`/`serde_json`、`sha2`、`flate2`（Rust 后端）、标准库文件锁（`File::lock`，Rust 1.89+）、`rand`、`time`、`similar`（diff）。
+依赖清单（全部纯 Rust）：`clap`（derive）、`serde`/`serde_json`、`toml`（配置）、`sha2`、`flate2`（Rust 后端）、标准库文件锁（`File::lock`，Rust 1.89+）、`rand`、`time`、`similar`（diff）。
 
 ## 4. 数据布局
 

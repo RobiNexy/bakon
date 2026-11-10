@@ -11,11 +11,13 @@ fn run(args: &[&str]) -> Output {
 }
 
 fn run_with_env(args: &[&str], environment: &[(&str, &Path)]) -> Output {
+    let isolated_config = std::env::temp_dir().join("bakon-tests-no-config.toml");
     let mut command = Command::new(env!("CARGO_BIN_EXE_bakon"));
     command
         .env_remove("BAKON_STORE")
         .env_remove("BAKON_HOME")
         .env_remove("VISUAL")
+        .env("BAKON_CONFIG", &isolated_config)
         .args(args);
     for (key, value) in environment {
         command.env(key, value);
@@ -33,13 +35,27 @@ fn stderr(output: &Output) -> String {
 
 /// 写一个把内容替换为 `body` 的编辑器脚本；路径以 `$1` 传入。
 fn editor_script(directory: &Path, body: &str) -> PathBuf {
-    let path = directory.join("editor.sh");
+    editor_script_named(directory, "editor.sh", body)
+}
+
+fn editor_script_named(directory: &Path, name: &str, body: &str) -> PathBuf {
+    let path = directory.join(name);
     fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
     }
+    path
+}
+
+fn write_config(directory: &Path, name: &str, max_versions: u32) -> PathBuf {
+    let path = directory.join(name);
+    fs::write(
+        &path,
+        format!("[retention]\nmax_versions = {max_versions}\n"),
+    )
+    .unwrap();
     path
 }
 
@@ -81,6 +97,33 @@ impl Fixture {
         let output = run_with_env(&full, &[("EDITOR", editor)]);
         full.clear();
         output
+    }
+
+    fn edit_with_config(&self, config: &Path, editor: &Path) -> Output {
+        let full = vec![
+            "--store",
+            self.store(),
+            "--config",
+            config.to_str().unwrap(),
+            "edit",
+            self.file(),
+        ];
+        run_with_env(&full, &[("EDITOR", editor)])
+    }
+
+    fn run_config(&self, config: &Path, args: &[&str]) -> Output {
+        let mut full = vec![
+            "--store",
+            self.store(),
+            "--config",
+            config.to_str().unwrap(),
+        ];
+        full.extend_from_slice(args);
+        run(&full)
+    }
+
+    fn temp(&self) -> &Path {
+        self._temporary.path()
     }
 }
 
@@ -457,4 +500,325 @@ fn revert_preserves_a_symlink() {
             .is_symlink()
     );
     assert_eq!(fs::read(&target).unwrap(), b"one");
+}
+
+#[test]
+fn hook_runs_after_commit_outside_the_lock() {
+    let fixture = Fixture::new(b"one");
+    let directory = fixture.temp();
+    let no_change = editor_script_named(directory, "noop.sh", "exit 0");
+    assert_eq!(fixture.edit(&no_change).status.code(), Some(0));
+
+    let record = directory.join("hook.log");
+    let hook = format!(
+        "printf '%s %s\\n' \"$BAKON_VERSION\" \"$BAKON_SOURCE\" >> {}; {} --store {} log {} >/dev/null",
+        record.display(),
+        env!("CARGO_BIN_EXE_bakon"),
+        fixture.store(),
+        fixture.file()
+    );
+    let set = fixture.run(&["hook", "set", fixture.file(), &hook]);
+    assert_eq!(set.status.code(), Some(0), "stderr: {}", stderr(&set));
+
+    let editor = editor_script(directory, "printf 'two' > \"$1\"");
+    let output = fixture.edit(&editor);
+
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    assert_eq!(fs::read_to_string(&record).unwrap().trim(), "1 edit");
+}
+
+#[test]
+fn a_failing_hook_exits_five_and_keeps_the_version() {
+    let fixture = Fixture::new(b"one");
+    let directory = fixture.temp();
+    let no_change = editor_script_named(directory, "noop.sh", "exit 0");
+    assert_eq!(fixture.edit(&no_change).status.code(), Some(0));
+    assert_eq!(
+        fixture
+            .run(&["hook", "set", fixture.file(), "exit 9"])
+            .status
+            .code(),
+        Some(0)
+    );
+
+    let editor = editor_script(directory, "printf 'two' > \"$1\"");
+    let output = fixture.edit(&editor);
+
+    assert_eq!(output.status.code(), Some(5), "stderr: {}", stderr(&output));
+    let log = fixture.run(&["--format", "plain", "log", fixture.file()]);
+    assert_eq!(stdout(&log).lines().count(), 2);
+}
+
+#[test]
+fn hook_can_be_shown_and_unset() {
+    let fixture = Fixture::new(b"one");
+    let editor = editor_script(fixture.temp(), "exit 0");
+    assert_eq!(fixture.edit(&editor).status.code(), Some(0));
+    assert_eq!(
+        fixture
+            .run(&["hook", "set", fixture.file(), "true"])
+            .status
+            .code(),
+        Some(0)
+    );
+
+    let shown = fixture.run(&["hook", "show", fixture.file()]);
+    assert_eq!(stdout(&shown).trim(), "true");
+
+    assert_eq!(
+        fixture
+            .run(&["hook", "unset", fixture.file()])
+            .status
+            .code(),
+        Some(0)
+    );
+    let shown = fixture.run(&["hook", "show", fixture.file()]);
+    assert_eq!(stdout(&shown).trim(), "(not set)");
+}
+
+#[test]
+fn prune_trims_old_versions_and_dry_run_changes_nothing() {
+    let fixture = Fixture::new(b"one");
+    let directory = fixture.temp();
+    let unlimited = write_config(directory, "unlimited.toml", 0);
+    let limited = write_config(directory, "limited.toml", 2);
+
+    let second = editor_script_named(directory, "second.sh", "printf 'two' > \"$1\"");
+    let third = editor_script_named(directory, "third.sh", "printf 'three' > \"$1\"");
+    assert_eq!(
+        fixture.edit_with_config(&unlimited, &second).status.code(),
+        Some(0)
+    );
+    assert_eq!(
+        fixture.edit_with_config(&unlimited, &third).status.code(),
+        Some(0)
+    );
+
+    let dry = fixture.run_config(&limited, &["prune", fixture.file(), "--dry-run"]);
+    assert_eq!(dry.status.code(), Some(0), "stderr: {}", stderr(&dry));
+    assert!(
+        stdout(&dry).contains("would prune"),
+        "stdout: {}",
+        stdout(&dry)
+    );
+    let log = fixture.run_config(&limited, &["--format", "plain", "log", fixture.file()]);
+    assert_eq!(stdout(&log).lines().count(), 3);
+
+    let real = fixture.run_config(&limited, &["prune", fixture.file()]);
+    assert_eq!(real.status.code(), Some(0), "stderr: {}", stderr(&real));
+    assert!(
+        stdout(&real).contains("pruned 1 version(s)"),
+        "stdout: {}",
+        stdout(&real)
+    );
+
+    let log = fixture.run_config(&limited, &["--format", "plain", "log", fixture.file()]);
+    assert_eq!(stdout(&log).lines().count(), 2);
+    let pruned = fixture.run(&["show", fixture.file(), "0"]);
+    assert_eq!(pruned.status.code(), Some(3));
+}
+
+#[test]
+fn prune_keeps_objects_shared_with_other_files() {
+    let fixture = Fixture::new(b"shared");
+    let directory = fixture.temp();
+    let unlimited = write_config(directory, "unlimited.toml", 0);
+    let limited = write_config(directory, "limited.toml", 2);
+
+    let second = editor_script_named(directory, "second.sh", "printf 'a2' > \"$1\"");
+    let third = editor_script_named(directory, "third.sh", "printf 'a3' > \"$1\"");
+    assert_eq!(
+        fixture.edit_with_config(&unlimited, &second).status.code(),
+        Some(0)
+    );
+    assert_eq!(
+        fixture.edit_with_config(&unlimited, &third).status.code(),
+        Some(0)
+    );
+
+    let other = directory.join("other.txt");
+    fs::write(&other, b"shared").unwrap();
+    let no_change = editor_script_named(directory, "noop.sh", "exit 0");
+    let tracked = run_with_env(
+        &[
+            "--store",
+            fixture.store(),
+            "--config",
+            unlimited.to_str().unwrap(),
+            "edit",
+            other.to_str().unwrap(),
+        ],
+        &[("EDITOR", &no_change)],
+    );
+    assert_eq!(
+        tracked.status.code(),
+        Some(0),
+        "stderr: {}",
+        stderr(&tracked)
+    );
+
+    let real = fixture.run_config(&limited, &["prune", fixture.file()]);
+    assert_eq!(real.status.code(), Some(0), "stderr: {}", stderr(&real));
+
+    let shown = fixture.run(&["show", other.to_str().unwrap(), "0"]);
+    assert_eq!(shown.stdout, b"shared");
+}
+
+#[test]
+fn mv_preserves_history_and_retracking_does_not_alias() {
+    let fixture = Fixture::new(b"one");
+    let directory = fixture.temp();
+    let editor = editor_script(directory, "printf 'two' > \"$1\"");
+    assert_eq!(fixture.edit(&editor).status.code(), Some(0));
+    let renamed = directory.join("renamed.txt");
+
+    let moved = fixture.run(&["mv", fixture.file(), renamed.to_str().unwrap()]);
+    assert_eq!(moved.status.code(), Some(0), "stderr: {}", stderr(&moved));
+
+    let log = fixture.run(&["--format", "plain", "log", renamed.to_str().unwrap()]);
+    assert_eq!(stdout(&log).lines().count(), 2);
+    let old = fixture.run(&["log", fixture.file()]);
+    assert_eq!(old.status.code(), Some(3));
+
+    let no_change = editor_script_named(directory, "noop.sh", "exit 0");
+    let retracked = run_with_env(
+        &["--store", fixture.store(), "edit", fixture.file()],
+        &[("EDITOR", &no_change)],
+    );
+    assert_eq!(
+        retracked.status.code(),
+        Some(0),
+        "stderr: {}",
+        stderr(&retracked)
+    );
+
+    let old = fixture.run(&["--format", "plain", "log", fixture.file()]);
+    assert_eq!(stdout(&old).lines().count(), 1);
+    let new = fixture.run(&["--format", "plain", "log", renamed.to_str().unwrap()]);
+    assert_eq!(stdout(&new).lines().count(), 2);
+}
+
+#[test]
+fn verify_reports_and_fixes_derived_data() {
+    let fixture = Fixture::new(b"one");
+    let editor = editor_script(fixture.temp(), "printf 'two' > \"$1\"");
+    assert_eq!(fixture.edit(&editor).status.code(), Some(0));
+
+    fs::write(fixture.store.join("index.json"), b"broken").unwrap();
+    fs::write(fixture.store.join("objects/tmp/leftover"), b"x").unwrap();
+
+    let broken = fixture.run(&["verify"]);
+    assert_eq!(broken.status.code(), Some(6), "stderr: {}", stderr(&broken));
+    let text = stdout(&broken);
+    assert!(text.contains("index does not match"), "{text}");
+    assert!(text.contains("leftover"), "{text}");
+
+    let fixed = fixture.run(&["verify", "--fix"]);
+    assert_eq!(fixed.status.code(), Some(0), "stderr: {}", stderr(&fixed));
+    assert!(
+        stdout(&fixed).contains("[fixed]"),
+        "stdout: {}",
+        stdout(&fixed)
+    );
+
+    let clean = fixture.run(&["verify"]);
+    assert_eq!(clean.status.code(), Some(0));
+    assert!(
+        stdout(&clean).contains("store is consistent"),
+        "stdout: {}",
+        stdout(&clean)
+    );
+}
+
+#[test]
+fn verify_detects_a_missing_object() {
+    let fixture = Fixture::new(b"one");
+    let editor = editor_script(fixture.temp(), "printf 'two' > \"$1\"");
+    assert_eq!(fixture.edit(&editor).status.code(), Some(0));
+
+    let objects = fixture.store.join("objects");
+    let shard = fs::read_dir(&objects)
+        .unwrap()
+        .filter_map(Result::ok)
+        .find(|entry| entry.file_name() != "tmp")
+        .unwrap()
+        .path();
+    let victim = fs::read_dir(&shard)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    fs::remove_file(&victim).unwrap();
+
+    let output = fixture.run(&["verify"]);
+
+    assert_eq!(output.status.code(), Some(6), "stderr: {}", stderr(&output));
+    assert!(
+        stdout(&output).contains("missing_blob"),
+        "stdout: {}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn verify_size_reports_object_bytes() {
+    let fixture = Fixture::new(b"one");
+    let editor = editor_script(fixture.temp(), "printf 'two' > \"$1\"");
+    assert_eq!(fixture.edit(&editor).status.code(), Some(0));
+
+    let output = fixture.run(&["--format", "json", "verify", "--size"]);
+
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    let text = stdout(&output);
+    assert!(text.contains("\"unique_object_bytes\":"), "{text}");
+    assert!(text.contains("\"checked_files\":1"), "{text}");
+}
+
+#[test]
+fn config_init_and_show_are_usable() {
+    let temporary = TempDir::new().unwrap();
+    let path = temporary.path().join("config.toml");
+    let path_arg = path.to_str().unwrap();
+
+    let init = run(&["--config", path_arg, "config", "init"]);
+    assert_eq!(init.status.code(), Some(0), "stderr: {}", stderr(&init));
+    assert!(
+        fs::read_to_string(&path)
+            .unwrap()
+            .contains("max_versions = 100")
+    );
+
+    let again = run(&["--config", path_arg, "config", "init"]);
+    assert!(stdout(&again).contains("already exists"));
+
+    let show = run(&["--config", path_arg, "--format", "json", "config", "show"]);
+    assert_eq!(show.status.code(), Some(0), "stderr: {}", stderr(&show));
+    let text = stdout(&show);
+    assert!(text.contains("\"max_versions\":100"), "{text}");
+    assert!(text.contains(path_arg), "{text}");
+}
+
+#[test]
+fn global_retention_trims_during_commit() {
+    let fixture = Fixture::new(b"one");
+    let directory = fixture.temp();
+    let config = write_config(directory, "config.toml", 2);
+    let second = editor_script_named(directory, "second.sh", "printf 'two' > \"$1\"");
+    let third = editor_script_named(directory, "third.sh", "printf 'three' > \"$1\"");
+
+    assert_eq!(
+        fixture.edit_with_config(&config, &second).status.code(),
+        Some(0)
+    );
+    assert_eq!(
+        fixture.edit_with_config(&config, &third).status.code(),
+        Some(0)
+    );
+
+    let log = fixture.run_config(&config, &["--format", "plain", "log", fixture.file()]);
+    let text = stdout(&log);
+    assert_eq!(text.lines().count(), 2, "{text}");
+    let oldest = fixture.run(&["show", fixture.file(), "0"]);
+    assert_eq!(oldest.status.code(), Some(3));
 }

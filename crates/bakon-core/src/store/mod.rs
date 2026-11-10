@@ -4,6 +4,7 @@
 //! 不存在的目录会被创建；非空且无标记的目录被拒绝，避免写入他人的数据。
 
 mod marker;
+mod verify;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
@@ -22,6 +23,7 @@ use crate::{Error, Result};
 
 pub use crate::SUPPORTED_SCHEMA;
 pub use marker::{MARKER_FILE, Marker};
+pub use verify::{SizeEntry, VerifyItem, VerifyOptions, VerifyReport};
 
 const LOCK_FILE: &str = ".lock";
 const PENDING_FILE: &str = ".pending";
@@ -72,6 +74,26 @@ pub struct Committed {
     id: FileId,
     version: Ver,
     source: Source,
+}
+
+/// 一个文件被裁剪的版本集合。
+#[derive(Clone, Debug)]
+pub struct PrunedFile {
+    pub id: FileId,
+    pub path: AbsPath,
+    pub versions: Vec<Ver>,
+}
+
+/// 裁剪结果；`dry_run` 时只报告、不改变持久状态。
+#[derive(Clone, Debug, Default)]
+pub struct PruneReport {
+    pub files: Vec<PrunedFile>,
+}
+
+impl PruneReport {
+    pub fn removed(&self) -> usize {
+        self.files.iter().map(|file| file.versions.len()).sum()
+    }
 }
 
 impl Committed {
@@ -358,6 +380,118 @@ impl Store {
     /// 全部被管理文件的身份，按清单文件名排序。
     pub fn all_ids(&self) -> Result<Vec<FileId>> {
         self.list_ids()
+    }
+
+    /// 只改路径映射，不动磁盘文件。
+    pub fn rename(&mut self, id: FileId, new_path: AbsPath) -> Result<()> {
+        let mut manifest = self.manifest(id)?;
+        if manifest.path == new_path {
+            return Ok(());
+        }
+        if self.resolve(&new_path)?.is_some() {
+            return Err(Error::AlreadyManaged { path: new_path });
+        }
+
+        manifest.path = new_path;
+        self.save_manifest(&manifest)?;
+
+        let keep = manifest.path.as_path().to_string_lossy().into_owned();
+        let stale: Vec<String> = self
+            .index_cache()
+            .entries
+            .iter()
+            .filter(|(key, value)| **value == id && key.as_str() != keep)
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in stale {
+            self.index_cache().entries.remove(&key);
+        }
+        self.remember(&manifest);
+        Ok(())
+    }
+
+    /// 设置或清除该文件的变更钩子。
+    pub fn set_hook(&self, id: FileId, hook: Option<String>) -> Result<()> {
+        let mut manifest = self.manifest(id)?;
+        manifest.hook = hook;
+        self.save_manifest(&manifest)
+    }
+
+    /// 按生效上限裁剪，并回收不再被任何清单引用的对象。
+    ///
+    /// `dry_run` 只报告，不移动对象、不写清单。调用方必须持有排他锁。
+    pub fn prune(&mut self, ids: &[FileId], dry_run: bool) -> Result<PruneReport> {
+        let mut manifests = std::collections::BTreeMap::new();
+        for id in self.list_ids()? {
+            manifests.insert(id, self.manifest(id)?);
+        }
+
+        let mut counts: std::collections::BTreeMap<BlobHash, usize> =
+            std::collections::BTreeMap::new();
+        if !dry_run {
+            for manifest in manifests.values() {
+                for record in &manifest.versions {
+                    *counts.entry(record.blob).or_default() += 1;
+                }
+            }
+        }
+
+        let mut report = PruneReport::default();
+        for id in ids {
+            let Some(manifest) = manifests.get(id).cloned() else {
+                continue;
+            };
+            let limit = manifest.effective_max_versions(self.default_max_versions);
+            if limit == 0 || manifest.versions.len() <= limit as usize {
+                continue;
+            }
+
+            let remove_count = manifest.versions.len() - limit as usize;
+            let removed: Vec<VersionRecord> = manifest.versions[..remove_count].to_vec();
+            report.files.push(PrunedFile {
+                id: *id,
+                path: manifest.path.clone(),
+                versions: removed.iter().map(|record| record.ver).collect(),
+            });
+            if dry_run {
+                continue;
+            }
+
+            let mut candidates = Vec::new();
+            for record in &removed {
+                let count = counts.get_mut(&record.blob).expect("blob was counted");
+                *count -= 1;
+                if *count == 0 {
+                    candidates.push(record.blob);
+                }
+            }
+            for hash in candidates {
+                self.move_to_trash(hash)?;
+            }
+
+            let mut trimmed = manifest;
+            trimmed.versions.drain(..remove_count);
+            self.save_manifest(&trimmed)?;
+        }
+
+        if !dry_run {
+            remove_dir_contents(self.root.join(TRASH_DIR).as_path())?;
+        }
+        Ok(report)
+    }
+
+    fn move_to_trash(&self, hash: BlobHash) -> Result<()> {
+        let from = self.objects.path(hash);
+        let to = self.root.join(TRASH_DIR).join(hash.to_hex());
+        match fs::rename(from.as_path(), to.as_path()) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(Error::Io(error)),
+        }
+    }
+
+    pub(crate) fn objects(&self) -> &ObjectStore {
+        &self.objects
     }
 
     fn index_cache(&mut self) -> &mut IndexCache {

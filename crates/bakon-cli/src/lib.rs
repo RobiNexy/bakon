@@ -4,6 +4,7 @@
 
 mod cli;
 mod commands;
+mod config;
 
 use std::process::ExitCode;
 
@@ -42,5 +43,14 @@ fn dispatch(cli: &Cli) -> Result<u8> {
             first,
             second,
         } => commands::diff(cli, file, *first, *second),
+        Command::Prune { file, dry_run } => commands::prune(cli, file.as_deref(), *dry_run),
+        Command::Mv { old, new } => commands::mv(cli, old, new),
+        Command::Hook {
+            action,
+            file,
+            command,
+        } => commands::hook(cli, *action, file, command.as_deref()),
+        Command::Config { action } => commands::config(cli, *action),
+        Command::Verify { fix, size } => commands::verify(cli, *fix, *size),
     }
 }

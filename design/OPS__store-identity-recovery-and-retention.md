@@ -23,7 +23,7 @@
 
 「非空」指除 `.`、`..` 外至少有一个条目。拒绝而不是「尽力而为」，因为写入一个不属于自己的目录是不可逆的副作用。
 
-默认存储位置按优先级：`--store` > `BAKON_STORE` > `BAKON_HOME/store` > `~/.bakon/store`。v1 不使用 0.x 的 `~/.bakon/repo`，两者可以并存。
+默认存储位置按优先级：`--store` > `BAKON_STORE` > 配置 `store` > `BAKON_HOME/store` > `~/.bakon/store`。v1 不使用 0.x 的 `~/.bakon/repo`，两者可以并存。
 
 ## 2. 为什么 0.x 的判定是错的
 

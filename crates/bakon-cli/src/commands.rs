@@ -10,12 +10,15 @@ use std::time::Duration;
 use bakon_core::apply;
 use bakon_core::manifest::{Manifest, Source, VersionRecord};
 use bakon_core::object::hash_bytes;
+use bakon_core::store::VerifyOptions;
 use bakon_core::{AbsPath, Error, Result, Store, Ver};
 
-use crate::cli::{Cli, Format};
+use crate::cli::{Cli, ConfigAction, Format, HookAction};
+use crate::config::{self, Config};
 
 pub fn init(cli: &Cli) -> Result<u8> {
-    let (store, created) = Store::init(store_path(cli)?)?;
+    let config = load_config(cli)?;
+    let (store, created) = Store::init(store_path(cli, &config)?)?;
     let root = store.root().as_path().display().to_string();
 
     let line = match cli.format {
@@ -49,7 +52,7 @@ pub fn version(format: Format) -> Result<u8> {
 /// `edit`：首次自动纳管；编辑器退出后按需提交。编辑器阶段不持锁。
 pub fn edit(cli: &Cli, file: &Path, no_hook: bool) -> Result<u8> {
     let path = AbsPath::new(file)?;
-    let mut store = open_store(cli)?;
+    let (mut store, config) = open_store_with(cli)?;
     let timeout = lock_timeout(cli);
 
     let (id, head, content_hash) = {
@@ -81,7 +84,7 @@ pub fn edit(cli: &Cli, file: &Path, no_hook: bool) -> Result<u8> {
         }
     };
 
-    run_editor(&path)?;
+    run_editor(&path, &editor_command(&config))?;
     let edited = read_target(&path)?;
     if hash_bytes(&edited) == content_hash {
         eprintln!("bakon: no changes to {}", path);
@@ -197,6 +200,275 @@ pub fn revert(cli: &Cli, file: &Path, version: u32, force: bool, no_hook: bool) 
         None => eprintln!("bakon: {} already matches version {}", path, ver),
     }
     Ok(0)
+}
+
+/// `prune`：按生效上限裁剪；`--dry-run` 只报告。
+pub fn prune(cli: &Cli, file: Option<&Path>, dry_run: bool) -> Result<u8> {
+    let mut store = open_store(cli)?;
+    let timeout = lock_timeout(cli);
+    let _guard = if dry_run {
+        store.lock_shared(timeout)?
+    } else {
+        store.begin_write(timeout)?
+    };
+
+    let ids = match file {
+        Some(file) => {
+            let path = AbsPath::new(file)?;
+            vec![store.resolve(&path)?.ok_or(Error::NotManaged(path))?]
+        }
+        None => store.all_ids()?,
+    };
+    let report = store.prune(&ids, dry_run)?;
+
+    if report.files.is_empty() {
+        emit("nothing to prune")?;
+    }
+    for file in &report.files {
+        match cli.format {
+            Format::Human => emit(&format!(
+                "{} {} version(s) from {}",
+                if dry_run { "would prune" } else { "pruned" },
+                file.versions.len(),
+                file.path
+            ))?,
+            Format::Plain => emit(&format!(
+                "{}\t{}\t{}",
+                file.path,
+                file.versions.len(),
+                dry_run
+            ))?,
+            Format::Json => emit(
+                &serde_json::json!({
+                    "path": file.path.as_path().to_string_lossy(),
+                    "removed": file.versions.iter().map(|ver| ver.get()).collect::<Vec<_>>(),
+                    "dry_run": dry_run,
+                })
+                .to_string(),
+            )?,
+        }
+    }
+    Ok(0)
+}
+
+/// `mv`：只改记录中的路径，不动磁盘文件。
+pub fn mv(cli: &Cli, old: &Path, new: &Path) -> Result<u8> {
+    let old = AbsPath::new(old)?;
+    let new = AbsPath::new(new)?;
+    let mut store = open_store(cli)?;
+    let _guard = store.begin_write(lock_timeout(cli))?;
+
+    let id = store
+        .resolve(&old)?
+        .ok_or_else(|| Error::NotManaged(old.clone()))?;
+    store.rename(id, new.clone())?;
+
+    match cli.format {
+        Format::Human => emit(&format!("renamed {old} -> {new}"))?,
+        Format::Plain => emit(&format!("{old}\t{new}"))?,
+        Format::Json => emit(
+            &serde_json::json!({
+                "old": old.as_path().to_string_lossy(),
+                "new": new.as_path().to_string_lossy(),
+            })
+            .to_string(),
+        )?,
+    }
+    Ok(0)
+}
+
+/// `hook`：设置、清除或查看单文件钩子。
+pub fn hook(cli: &Cli, action: HookAction, file: &Path, command: Option<&str>) -> Result<u8> {
+    let path = AbsPath::new(file)?;
+    let mut store = open_store(cli)?;
+    let timeout = lock_timeout(cli);
+
+    match action {
+        HookAction::Show => {
+            let _guard = store.lock_shared(timeout)?;
+            let id = store
+                .resolve(&path)?
+                .ok_or_else(|| Error::NotManaged(path.clone()))?;
+            let manifest = store.manifest(id)?;
+            match cli.format {
+                Format::Json => emit(&serde_json::json!({ "hook": manifest.hook }).to_string())?,
+                _ => emit(manifest.hook.as_deref().unwrap_or("(not set)"))?,
+            }
+        }
+        HookAction::Set => {
+            let command =
+                command.ok_or_else(|| Error::Usage("hook set needs a shell command".into()))?;
+            if command.trim().is_empty() {
+                return Err(Error::Usage("hook command cannot be empty".into()));
+            }
+            let _guard = store.begin_write(timeout)?;
+            let id = store
+                .resolve(&path)?
+                .ok_or_else(|| Error::NotManaged(path.clone()))?;
+            store.set_hook(id, Some(command.to_owned()))?;
+            emit(&format!("hook set for {path}"))?;
+        }
+        HookAction::Unset => {
+            let _guard = store.begin_write(timeout)?;
+            let id = store
+                .resolve(&path)?
+                .ok_or_else(|| Error::NotManaged(path.clone()))?;
+            store.set_hook(id, None)?;
+            emit(&format!("hook unset for {path}"))?;
+        }
+    }
+    Ok(0)
+}
+
+/// `config`：展示生效配置或写入默认文件。
+pub fn config(cli: &Cli, action: ConfigAction) -> Result<u8> {
+    let path = config::path(cli.config.as_deref())?;
+    match action {
+        ConfigAction::Init => {
+            let written = config::init(&path)?;
+            let line = if written {
+                format!("wrote {}", path.display())
+            } else {
+                format!("already exists, left untouched: {}", path.display())
+            };
+            emit(&line)?;
+        }
+        ConfigAction::Show => {
+            let config = config::load(&path)?;
+            let store = store_path(cli, &config)?;
+            let editor = editor_command(&config);
+            let max_versions = config.max_versions();
+            let line = match cli.format {
+                Format::Human => format!(
+                    "config:       {}\nstore:        {}\neditor:       {}\nmax_versions: {} (global, 0 = unlimited)",
+                    path.display(),
+                    store.display(),
+                    editor,
+                    max_versions
+                ),
+                Format::Plain => format!(
+                    "{}\t{}\t{}\t{}",
+                    path.display(),
+                    store.display(),
+                    editor,
+                    max_versions
+                ),
+                Format::Json => serde_json::json!({
+                    "config": path.display().to_string(),
+                    "store": store.display().to_string(),
+                    "editor": editor,
+                    "max_versions": max_versions,
+                })
+                .to_string(),
+            };
+            emit(&line)?;
+        }
+    }
+    Ok(0)
+}
+
+/// `verify`：一致返回 0，发现不一致返回 6。
+pub fn verify(cli: &Cli, fix: bool, size: bool) -> Result<u8> {
+    let mut store = open_store(cli)?;
+    let timeout = lock_timeout(cli);
+    let _guard = if fix {
+        store.begin_write(timeout)?
+    } else {
+        store.lock_shared(timeout)?
+    };
+    let report = store.verify(VerifyOptions { fix, size })?;
+
+    match cli.format {
+        Format::Human => {
+            if report.ok() {
+                emit("store is consistent")?;
+            }
+            for item in &report.items {
+                let location = match (&item.path, item.ver) {
+                    (Some(path), Some(ver)) => format!(" {path} v{ver}"),
+                    (Some(path), None) => format!(" {path}"),
+                    _ => String::new(),
+                };
+                emit(&format!(
+                    "{}{}  {}{}",
+                    item.kind,
+                    location,
+                    item.detail,
+                    if item.fixed { " [fixed]" } else { "" }
+                ))?;
+            }
+            if size {
+                emit(&format!(
+                    "checked {} file(s); unique object bytes {}",
+                    report.checked_files, report.unique_object_bytes
+                ))?;
+                for entry in &report.sizes {
+                    emit(&format!(
+                        "  {}  versions {}  objects {} B  manifest {} B",
+                        entry.path, entry.versions, entry.object_bytes, entry.manifest_bytes
+                    ))?;
+                }
+            }
+        }
+        Format::Plain => {
+            for item in &report.items {
+                emit(&format!(
+                    "{}\t{}\t{}\t{}\t{}",
+                    item.kind,
+                    item.path
+                        .as_ref()
+                        .map(|path| path.as_path().to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                    item.ver
+                        .map(Ver::get)
+                        .map(|ver| ver.to_string())
+                        .unwrap_or_default(),
+                    item.detail,
+                    item.fixed
+                ))?;
+            }
+            if size {
+                for entry in &report.sizes {
+                    emit(&format!(
+                        "size\t{}\t{}\t{}\t{}",
+                        entry.path, entry.versions, entry.object_bytes, entry.manifest_bytes
+                    ))?;
+                }
+                emit(&format!("unique\t{}", report.unique_object_bytes))?;
+            }
+        }
+        Format::Json => {
+            let items: Vec<serde_json::Value> = report
+                .items
+                .iter()
+                .map(|item| {
+                    serde_json::json!({
+                        "kind": item.kind,
+                        "path": item.path.as_ref().map(|path| path.as_path().to_string_lossy().into_owned()),
+                        "ver": item.ver.map(Ver::get),
+                        "detail": item.detail,
+                        "fixed": item.fixed,
+                    })
+                })
+                .collect();
+            let mut value = serde_json::json!({ "ok": report.ok(), "items": items });
+            if size {
+                value["size"] = serde_json::json!({
+                    "checked_files": report.checked_files,
+                    "unique_object_bytes": report.unique_object_bytes,
+                    "files": report.sizes.iter().map(|entry| serde_json::json!({
+                        "path": entry.path.as_path().to_string_lossy(),
+                        "versions": entry.versions,
+                        "object_bytes": entry.object_bytes,
+                        "manifest_bytes": entry.manifest_bytes,
+                    })).collect::<Vec<_>>(),
+                });
+            }
+            emit(&value.to_string())?;
+        }
+    }
+
+    Ok(if report.ok() { 0 } else { 6 })
 }
 
 /// `log`：最新在前，数据走 stdout。
@@ -461,16 +733,7 @@ fn run_hook(
     }
 }
 
-fn run_editor(path: &AbsPath) -> Result<()> {
-    let editor = env::var("VISUAL")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .or_else(|| {
-            env::var("EDITOR")
-                .ok()
-                .filter(|value| !value.trim().is_empty())
-        })
-        .unwrap_or_else(|| "vi".into());
+fn run_editor(path: &AbsPath, editor: &str) -> Result<()> {
     let command = format!(
         "{editor} {}",
         shell_quote(&path.as_path().to_string_lossy())
@@ -503,17 +766,31 @@ fn shell_quote(text: &str) -> String {
     quoted
 }
 
-fn open_store(cli: &Cli) -> Result<Store> {
-    Store::open(store_path(cli)?)
+fn load_config(cli: &Cli) -> Result<Config> {
+    config::load(&config::path(cli.config.as_deref())?)
 }
 
-/// 存储位置优先级：`--store` > `BAKON_STORE` > `BAKON_HOME/store` > `~/.bakon/store`。
-fn store_path(cli: &Cli) -> Result<PathBuf> {
+fn open_store(cli: &Cli) -> Result<Store> {
+    open_store_with(cli).map(|(store, _)| store)
+}
+
+fn open_store_with(cli: &Cli) -> Result<(Store, Config)> {
+    let config = load_config(cli)?;
+    let mut store = Store::open(store_path(cli, &config)?)?;
+    store.set_default_max_versions(config.max_versions());
+    Ok((store, config))
+}
+
+/// 存储位置优先级：`--store` > `BAKON_STORE` > 配置 `store` > `BAKON_HOME/store` > `~/.bakon/store`。
+fn store_path(cli: &Cli, config: &Config) -> Result<PathBuf> {
     if let Some(path) = &cli.store {
         return Ok(path.clone());
     }
     if let Some(path) = env::var_os("BAKON_STORE").filter(|value| !value.is_empty()) {
         return Ok(PathBuf::from(path));
+    }
+    if let Some(path) = config.store_path() {
+        return Ok(path);
     }
     if let Some(home) = env::var_os("BAKON_HOME").filter(|value| !value.is_empty()) {
         return Ok(PathBuf::from(home).join("store"));
@@ -521,6 +798,25 @@ fn store_path(cli: &Cli) -> Result<PathBuf> {
     let home = home_dir()
         .ok_or_else(|| Error::Usage("cannot determine the home directory; pass --store".into()))?;
     Ok(home.join(".bakon").join("store"))
+}
+
+/// 编辑器优先级：`$VISUAL` > `$EDITOR` > 配置 `editor` > `vi`。
+fn editor_command(config: &Config) -> String {
+    env::var("VISUAL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            env::var("EDITOR")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        })
+        .or_else(|| {
+            config
+                .editor
+                .clone()
+                .filter(|value| !value.trim().is_empty())
+        })
+        .unwrap_or_else(|| "vi".into())
 }
 
 fn home_dir() -> Option<PathBuf> {

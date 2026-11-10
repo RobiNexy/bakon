@@ -81,6 +81,7 @@ pub enum Error {
     LockTimeout { holder: Option<u32>, waited: Duration },
     Diverged { path: AbsPath, hint: &'static str },
     HeadChanged { expected: Ver, actual: Ver },
+    AlreadyManaged { path: AbsPath },
     Corrupt { what: &'static str, detail: String },
     ApplyFailed { ver: Ver, source: io::Error },
     Io(io::Error),
@@ -118,7 +119,9 @@ pub enum Error {
 
 全局：`--store`、`--config`、`--format human|plain|json`、`--no-color`、`--no-hook`、`--lock-timeout`。
 
-`edit` 的编辑器取 `$VISUAL` → `$EDITOR` → `vi`；`config.editor` 在 M2 接入。诊断与进度走 stderr，stdout 只放数据。
+`edit` 的编辑器取 `$VISUAL` → `$EDITOR` → 配置 `editor` → `vi`；诊断与进度走 stderr，stdout 只放数据。
+
+配置文件位置：`--config` > `$BAKON_CONFIG` > `$BAKON_HOME/config.toml` > `$XDG_CONFIG_HOME/bakon/config.toml` > `~/.config/bakon/config.toml`。v1 不读取 0.x 的 `~/.bakon/config.toml`，避免沿用指向旧 `repo/` 的 `store`。
 
 ## 6. 输出格式
 

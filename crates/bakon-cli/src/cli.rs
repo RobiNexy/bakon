@@ -15,6 +15,10 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "DIR")]
     pub store: Option<PathBuf>,
 
+    /// Config file; defaults to $BAKON_CONFIG, then $BAKON_HOME/config.toml, then ~/.bakon/config.toml
+    #[arg(long, global = true, value_name = "FILE")]
+    pub config: Option<PathBuf>,
+
     /// Output format
     #[arg(long, global = true, value_enum, default_value = "human")]
     pub format: Format,
@@ -98,4 +102,55 @@ pub enum Command {
         /// Newer version; defaults to the latest version
         second: Option<u32>,
     },
+    /// Trim old versions for one file or every file
+    Prune {
+        /// Tracked file; defaults to every file
+        file: Option<PathBuf>,
+        /// Report what would be removed without changing anything
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Change the recorded path without touching the file on disk
+    Mv {
+        /// Currently tracked path
+        old: PathBuf,
+        /// New recorded path
+        new: PathBuf,
+    },
+    /// Set, unset or show a per-file hook
+    Hook {
+        #[arg(value_enum)]
+        action: HookAction,
+        /// Tracked file
+        file: PathBuf,
+        /// Shell command for `set`
+        command: Option<String>,
+    },
+    /// Show effective configuration or write a default file
+    Config {
+        #[arg(value_enum)]
+        action: ConfigAction,
+    },
+    /// Check store consistency
+    Verify {
+        /// Repair derived data (sizes, index, leftovers)
+        #[arg(long)]
+        fix: bool,
+        /// Also report space usage
+        #[arg(long)]
+        size: bool,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum HookAction {
+    Set,
+    Unset,
+    Show,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum ConfigAction {
+    Show,
+    Init,
 }
