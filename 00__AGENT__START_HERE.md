@@ -27,6 +27,8 @@ You are an agent helping maintain this project. This is the only entry point. Lo
 |---|---|
 | Create, accept, reject or supersede an ADR | [[AGENT__procedure__adr]] |
 | Finish a task | [[AGENT__procedure__task_end]] |
+| Solve a hard algorithm, protocol, concurrency, type-system or architecture problem, or judge whether a claim holds | [[AGENT__procedure__formal-problem-solving]] |
+| Write or review Go code, or choose between Go mechanisms | [[AGENT__procedure__go-engineering]] |
 | Tidy the knowledge base, or `journal/` has more than 20 entries | [[AGENT__procedure__compaction]] |
 | Work in a freshly installed project | [[AGENT__procedure__first_session]] |
 | Touch deployment, infrastructure, or anything on the path to production | [[AGENT__procedure__production_readiness]] |
