@@ -12,7 +12,7 @@
 ## Known limitations
 
 - v1 的正确性依赖 POSIX `rename` 与目录 `fsync`；Windows 无目录 `fsync` 等价语义，崩溃恢复退化为「可能丢失最后一次提交」。
-- 7 个交叉编译目标的工具链尚未验证；本机未安装 Rust 工具链（`rustc` 不在 PATH）。
+- 7 个交叉编译目标的工具链尚未验证；本机只有宿主默认目标 `x86_64-unknown-linux-gnu`（Rust stable 1.99.1 已装，`~/.cargo/bin` 在 PATH）。
 - 旧存储迁移不在 v1.0 范围。
 - `README.md` 与 `docs/design.md` 仍描述 0.x，尚未同步 v1。
 
