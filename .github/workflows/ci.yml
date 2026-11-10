@@ -69,6 +69,17 @@ jobs:
           ./target/debug/bakon --store ./ci-store init
           ./target/debug/bakon --store ./ci-store init
           ./target/debug/bakon --store ./ci-store verify
+      - name: edit and revert on Windows
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          printf 'one\n' > note.txt
+          printf '@echo off\r\necho two> "%%1"\r\n' > editor.bat
+          export EDITOR="$(cygpath -w "$PWD/editor.bat")"
+          ./target/debug/bakon --store ./ci-store edit ./note.txt
+          ./target/debug/bakon --store ./ci-store log ./note.txt
+          ./target/debug/bakon --store ./ci-store revert ./note.txt 0
+          test "$(cat note.txt)" = "one"
 
   cross-build:
     runs-on: ubuntu-latest
