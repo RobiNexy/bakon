@@ -21,6 +21,12 @@
 - Options: (1) 权威数据：先提交后写索引，verify 双向校验；(2) 缓存：允许丢失，由 `verify --fix` 从 `files/*` 与提交正文的 `path:` 行重建。
 - Decision: pending
 
+### Q-storage-backend: 是否把 git 从「历史引擎」降为「对象存储」，或彻底自研存储？
+
+- Impact: 决定 F1（prune 重写无关仓库）、F12（稳态约 750 ms）、F13（`GIT_DIR` 劫持）、F6 与索引一致性问题是被修复还是整体消失。把 git 降为对象存储后，prune 变成清单裁剪，不再重写历史。
+- Options: (1) 保持提交模型，只加前置校验与重试；(2) 每版一个 blob，版本清单进索引/manifest，git 只承担 `hash-object` / `cat-file` / `gc`；(3) 自研内容寻址存储，去掉 git 依赖。
+- Decision: pending
+
 ### Q-revert-overwrite: revert 到最新版本、而磁盘内容已偏离时如何处理？
 
 - Impact: 当前静默覆盖且不产生版本，外部改动不可恢复。

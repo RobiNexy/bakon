@@ -16,7 +16,7 @@
 - P1 per-file `max_versions=0` 无法表达「不限制」，回退到全局上限
 - P1 diff 出错退出码为 1，与「差异=1、出错=2」契约冲突；ExitCode 依赖错误字符串匹配
 - P1 钩子内调用需要写锁的 bakon 命令导致死锁（锁不可重入、无超时）
-- P2 prune 在保留上限处重写全库历史：100 提交时单次 edit 约 750 ms（无裁剪约 26 ms）
+- P2 prune 在保留上限处重写全库历史：100 提交时单次 edit 约 750 ms（无裁剪约 26 ms）— blocked by Q-storage-backend
 - P2 `gc --prune=now` 与不取锁的读者竞争，读者可能碰到已删除对象
 - P2 编辑器会话期间锁被长期持有，第二个写操作无提示地阻塞
 - P2 文档漂移：design.md 写钩子失败退出码 2（实现 5）、`BAKON_PREV` 首值定义含糊、new_design §13 仍列 `bakon migrate`
