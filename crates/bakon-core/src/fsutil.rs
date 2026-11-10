@@ -50,9 +50,11 @@ pub(crate) fn write_atomic(path: &AbsPath, tmp_dir: &AbsPath, bytes: &[u8]) -> R
         let _ = fs::remove_file(temporary.as_path());
         return Err(error);
     }
+    durability_point();
 
     if let Some(parent) = path.as_path().parent() {
         fsync_dir(parent)?;
+        durability_point();
     }
     // 不 fsync 临时目录：崩溃残留的 tmp 文件没有引用，启动时会被清空；
     // 目标目录的 fsync 才决定 rename 结果是否可见。
@@ -61,8 +63,38 @@ pub(crate) fn write_atomic(path: &AbsPath, tmp_dir: &AbsPath, bytes: &[u8]) -> R
 
 fn write_and_sync(file: &mut File, bytes: &[u8]) -> Result<()> {
     file.write_all(bytes).map_err(Error::Io)?;
-    file.sync_all().map_err(Error::Io)
+    file.sync_all().map_err(Error::Io)?;
+    durability_point();
+    Ok(())
 }
+
+/// 测试用崩溃点：debug 构建下，`BAKON_TEST_CRASH_AFTER=n` 会在第 n 次持久化动作后
+/// 终止进程，用于枚举崩溃位置。release 构建不编译这段逻辑。
+#[cfg(debug_assertions)]
+pub(crate) fn durability_point() {
+    use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static COUNT: AtomicU64 = AtomicU64::new(0);
+    static LIMIT: OnceLock<Option<u64>> = OnceLock::new();
+
+    let limit = *LIMIT.get_or_init(|| {
+        std::env::var("BAKON_TEST_CRASH_AFTER")
+            .ok()
+            .and_then(|value| value.parse().ok())
+    });
+    let Some(limit) = limit else {
+        return;
+    };
+    let count = COUNT.fetch_add(1, Ordering::SeqCst) + 1;
+    if count == limit {
+        // 模拟进程崩溃：不运行析构，但此前的 fsync 已生效。
+        std::process::exit(137);
+    }
+}
+
+#[cfg(not(debug_assertions))]
+pub(crate) fn durability_point() {}
 
 /// 临时文件名由目标文件名、pid、单调序号与随机数组成，避免并发写者互撞。
 fn temporary_path(tmp_dir: &AbsPath, path: &AbsPath) -> AbsPath {

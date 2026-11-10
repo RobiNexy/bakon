@@ -707,21 +707,7 @@ fn run_hook(
         return Ok(());
     }
 
-    let status = ProcessCommand::new("sh")
-        .arg("-c")
-        .arg(hook)
-        .env("BAKON_FILE", manifest.path.as_path())
-        .env("BAKON_VERSION", version.get().to_string())
-        .env("BAKON_SOURCE", source_name(source))
-        .env(
-            "BAKON_PREV",
-            previous
-                .map(|ver| ver.get().to_string())
-                .unwrap_or_default(),
-        )
-        .env("BAKON_HOOK", "1")
-        .status()
-        .map_err(Error::Io)?;
+    let status = run_shell_with_env(hook, manifest, version, source, previous)?;
 
     if status.success() {
         Ok(())
@@ -733,16 +719,47 @@ fn run_hook(
     }
 }
 
+fn run_shell_with_env(
+    hook: &str,
+    manifest: &Manifest,
+    version: Ver,
+    source: Source,
+    previous: Option<Ver>,
+) -> Result<std::process::ExitStatus> {
+    #[cfg(windows)]
+    let mut command = {
+        let mut command = ProcessCommand::new("cmd");
+        command.arg("/C").arg(hook);
+        command
+    };
+    #[cfg(not(windows))]
+    let mut command = {
+        let mut command = ProcessCommand::new("sh");
+        command.arg("-c").arg(hook);
+        command
+    };
+
+    command
+        .env("BAKON_FILE", manifest.path.as_path())
+        .env("BAKON_VERSION", version.get().to_string())
+        .env("BAKON_SOURCE", source_name(source))
+        .env(
+            "BAKON_PREV",
+            previous
+                .map(|ver| ver.get().to_string())
+                .unwrap_or_default(),
+        )
+        .env("BAKON_HOOK", "1")
+        .status()
+        .map_err(Error::Io)
+}
+
 fn run_editor(path: &AbsPath, editor: &str) -> Result<()> {
     let command = format!(
         "{editor} {}",
         shell_quote(&path.as_path().to_string_lossy())
     );
-    let status = ProcessCommand::new("sh")
-        .arg("-c")
-        .arg(&command)
-        .status()
-        .map_err(Error::Io)?;
+    let status = run_shell(&command)?;
     if status.success() {
         Ok(())
     } else {
@@ -752,18 +769,34 @@ fn run_editor(path: &AbsPath, editor: &str) -> Result<()> {
     }
 }
 
+/// Unix 用 `sh -c`，Windows 用 `cmd /C`；钩子与编辑器共用。
+fn run_shell(command: &str) -> Result<std::process::ExitStatus> {
+    #[cfg(windows)]
+    let status = ProcessCommand::new("cmd").arg("/C").arg(command).status();
+    #[cfg(not(windows))]
+    let status = ProcessCommand::new("sh").arg("-c").arg(command).status();
+    status.map_err(Error::Io)
+}
+
 /// 单引号转义，供 `sh -c` 使用。
 fn shell_quote(text: &str) -> String {
-    let mut quoted = String::with_capacity(text.len() + 2);
-    quoted.push('\'');
-    for character in text.chars() {
-        match character {
-            '\'' => quoted.push_str("'\\''"),
-            character => quoted.push(character),
-        }
+    #[cfg(windows)]
+    {
+        format!("\"{}\"", text.replace('"', "\"\""))
     }
-    quoted.push('\'');
-    quoted
+    #[cfg(not(windows))]
+    {
+        let mut quoted = String::with_capacity(text.len() + 2);
+        quoted.push('\'');
+        for character in text.chars() {
+            match character {
+                '\'' => quoted.push_str("'\\''"),
+                character => quoted.push(character),
+            }
+        }
+        quoted.push('\'');
+        quoted
+    }
 }
 
 fn load_config(cli: &Cli) -> Result<Config> {

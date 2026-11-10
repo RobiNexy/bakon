@@ -31,6 +31,25 @@ jobs:
       - name: cargo test
         run: cargo test --workspace --all-targets
 
+  rust-cross:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - aarch64-unknown-linux-gnu
+          - armv7-unknown-linux-gnueabihf
+          - x86_64-apple-darwin
+          - aarch64-apple-darwin
+          - x86_64-pc-windows-gnu
+          - aarch64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install target
+        run: rustup target add ${{ matrix.target }}
+      - name: cargo check
+        run: cargo check --workspace --target ${{ matrix.target }}
+
   cross-build:
     runs-on: ubuntu-latest
     steps:

@@ -33,7 +33,9 @@ fn write_existing(path: &AbsPath, content: &[u8]) -> Result<()> {
         .open(path.as_path())
         .map_err(Error::Io)?;
     file.write_all(content).map_err(Error::Io)?;
-    file.sync_all().map_err(Error::Io)
+    file.sync_all().map_err(Error::Io)?;
+    crate::fsutil::durability_point();
+    Ok(())
 }
 
 fn create_new(path: &AbsPath, content: &[u8]) -> Result<()> {
@@ -48,10 +50,12 @@ fn create_new(path: &AbsPath, content: &[u8]) -> Result<()> {
     let mut file = options.open(path.as_path()).map_err(Error::Io)?;
     file.write_all(content).map_err(Error::Io)?;
     file.sync_all().map_err(Error::Io)?;
+    crate::fsutil::durability_point();
     drop(file);
 
     if let Some(parent) = path.as_path().parent() {
         fsync_dir(parent)?;
+        crate::fsutil::durability_point();
     }
     Ok(())
 }

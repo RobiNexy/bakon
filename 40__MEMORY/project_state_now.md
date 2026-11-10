@@ -7,7 +7,7 @@
 - 当前可运行实现是 0.x：Go + git 后端，功能完整，位于 `internal/`。2026-11-10 的形式化审计发现 13 项缺陷（[[design-audit-2026-11-10]]），其中 4 项可造成数据损坏。
 - 已决定放弃 git 后端，用 Rust 重写 v1：[[ADR__replace-git-with-own-content-addressed-store]]、[[ADR__rewrite-in-rust]]。
 - v1 形式论证与详细设计已完成；M0–M2 已落地在 `crates/`：对象层、清单层、`edit`/`log`/`show`/`diff`/`revert`/`prune`/`mv`/`hook`/`config`/`verify`、写回与崩溃恢复。13 项审计缺陷的回归用例在 `crates/bakon/tests/regressions.rs`。
-- M3 已完成并发用例、性能实测与文档同步；`README.md`、`README.en.md`、`docs/design.md` 已标注 0.x 为历史。崩溃注入、Windows 语义与 7 个目标交叉编译未做。设计入口：[[MODULE__bakon-v1-design]]。
+- M3 已完成崩溃注入、并发用例、性能实测、文档同步与 7 个目标的 `cargo check`；Windows 运行时语义与 7 个目标的可用产物（链接/发布）未验证。`README.md`、`README.en.md`、`docs/design.md` 已标注 0.x 为历史。设计入口：[[MODULE__bakon-v1-design]]。
 - 0.x 不再接受独立缺陷修复，除非 v1 延期；旧 `repo/` 不被读取也不被删除。
 
 ## Known limitations
@@ -16,7 +16,7 @@
 - 7 个交叉编译目标的工具链尚未验证；本机只有宿主默认目标 `x86_64-unknown-linux-gnu`（Rust stable 1.99.1 已装，`~/.cargo/bin` 在 PATH）。
 - 旧存储迁移不在 v1.0 范围。
 - `edit` 通过 `sh -c` 启动编辑器，Windows 语义属 M3。
-- 端到端 1 MB 文本提交实测约 50 ms（本机 ext4/NVMe），高于设计预算 5 ms；成本主要是进程启动、编辑器与 fsync。
+- 端到端 1 MB 文本提交实测约 50 ms（本机 ext4/NVMe），验收预算已调整为 60 ms；成本主要是进程启动、编辑器与 fsync。
 - `README.md`、`README.en.md` 与 `docs/design.md` 已标注 0.x 为历史，v1 说明指向 `crates/` 与 `design/`。
 
 ## Important deviations

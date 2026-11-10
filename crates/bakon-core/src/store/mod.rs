@@ -484,7 +484,10 @@ impl Store {
         let from = self.objects.path(hash);
         let to = self.root.join(TRASH_DIR).join(hash.to_hex());
         match fs::rename(from.as_path(), to.as_path()) {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                crate::fsutil::durability_point();
+                Ok(())
+            }
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(Error::Io(error)),
         }
