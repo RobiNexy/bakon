@@ -66,6 +66,15 @@ impl Prepared {
             head.pending_apply = pending;
         }
     }
+
+    /// 清除任意一个历史版本的待写回标记。
+    pub fn clear_pending(&mut self, version: Ver) {
+        for record in &mut self.manifest.versions {
+            if record.ver == version {
+                record.pending_apply = false;
+            }
+        }
+    }
 }
 
 /// 已提交的版本；只有它才能触发目标文件写回（M2）。
@@ -74,6 +83,7 @@ pub struct Committed {
     id: FileId,
     version: Ver,
     source: Source,
+    trim_failed: bool,
 }
 
 /// 一个文件被裁剪的版本集合。
@@ -108,6 +118,11 @@ impl Committed {
     pub fn source(self) -> Source {
         self.source
     }
+
+    /// 裁剪后的对象回收是否失败；失败不影响已经提交的版本。
+    pub fn trim_failed(self) -> bool {
+        self.trim_failed
+    }
 }
 
 impl Store {
@@ -124,6 +139,7 @@ impl Store {
             Ok(_) if marker_path.is_file() => {
                 let marker = read_marker(&marker_path)?;
                 marker.validate()?;
+                remove_init_temps(&root)?;
                 ensure_layout(&root)?;
                 Ok((Self::compose(root, marker), false))
             }
@@ -171,7 +187,7 @@ impl Store {
     }
 
     /// 取得排他写锁，并执行恢复动作（清理暂存、检查待写回标记）。
-    pub fn begin_write(&self, timeout: Duration) -> Result<StoreLock> {
+    pub fn begin_write(&mut self, timeout: Duration) -> Result<StoreLock> {
         let guard = self.acquire(true, timeout)?;
         self.recover()?;
         Ok(guard)
@@ -200,7 +216,6 @@ impl Store {
             let manifest = self.manifest(id)?;
             if manifest.path == *path {
                 self.index_cache().entries.insert(key, id);
-                self.save_index();
                 return Ok(Some(id));
             }
         }
@@ -302,18 +317,41 @@ impl Store {
             )));
         }
 
+        let removed: Vec<VersionRecord> = current
+            .as_ref()
+            .map(|manifest| {
+                let kept: BTreeSet<Ver> = prepared
+                    .manifest
+                    .versions
+                    .iter()
+                    .map(|record| record.ver)
+                    .collect();
+                manifest
+                    .versions
+                    .iter()
+                    .filter(|record| !kept.contains(&record.ver))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+
         self.objects.put(&prepared.content)?;
         self.save_manifest(&prepared.manifest)?;
         self.remember(&prepared.manifest);
+
+        // 裁剪已经作为清单提交的一部分生效；对象回收失败时保留孤儿，
+        // 由 verify --fix 或下一次 prune 收敛，不回滚已提交的版本。
+        let trim_failed = !removed.is_empty() && self.reclaim_removed(&removed).is_err();
 
         Ok(Committed {
             id,
             version: newest.ver,
             source: newest.source,
+            trim_failed,
         })
     }
 
-    fn manifest_path(&self, id: FileId) -> AbsPath {
+    pub fn manifest_path(&self, id: FileId) -> AbsPath {
         self.root.join(FILES_DIR).join(format!("{id}.json"))
     }
 
@@ -476,12 +514,13 @@ impl Store {
         }
 
         if !dry_run {
-            remove_dir_contents(self.root.join(TRASH_DIR).as_path())?;
+            // 兜底回收：提交裁剪、prune 崩溃或失败提交留下的孤儿对象。
+            self.reclaim_orphans()?;
         }
         Ok(report)
     }
 
-    fn move_to_trash(&self, hash: BlobHash) -> Result<()> {
+    pub(crate) fn move_to_trash(&self, hash: BlobHash) -> Result<()> {
         let from = self.objects.path(hash);
         let to = self.root.join(TRASH_DIR).join(hash.to_hex());
         match fs::rename(from.as_path(), to.as_path()) {
@@ -492,6 +531,60 @@ impl Store {
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(Error::Io(error)),
         }
+    }
+
+    /// 当前所有清单引用的对象集合。
+    fn referenced_blobs(&self) -> Result<BTreeSet<BlobHash>> {
+        let mut referenced = BTreeSet::new();
+        for id in self.list_ids()? {
+            for record in &self.manifest(id)?.versions {
+                referenced.insert(record.blob);
+            }
+        }
+        Ok(referenced)
+    }
+
+    /// 移动被裁剪版本引用、且已无任何清单引用的对象。
+    fn reclaim_removed(&self, removed: &[VersionRecord]) -> Result<usize> {
+        let candidates: BTreeSet<BlobHash> = removed.iter().map(|record| record.blob).collect();
+        if candidates.is_empty() {
+            return Ok(0);
+        }
+        let referenced = self.referenced_blobs()?;
+        let mut moved = 0;
+        for hash in candidates {
+            if !referenced.contains(&hash) {
+                self.move_to_trash(hash)?;
+                moved += 1;
+            }
+        }
+        remove_dir_contents(self.root.join(TRASH_DIR).as_path())?;
+        Ok(moved)
+    }
+
+    /// 回收所有不在任何清单中的对象；调用方必须持有排他锁。
+    pub(crate) fn reclaim_orphans(&self) -> Result<usize> {
+        let referenced = self.referenced_blobs()?;
+        let mut moved = 0;
+        for hash in self.objects.list_hashes()? {
+            if !referenced.contains(&hash) {
+                self.move_to_trash(hash)?;
+                moved += 1;
+            }
+        }
+        remove_dir_contents(self.root.join(TRASH_DIR).as_path())?;
+        Ok(moved)
+    }
+
+    /// 列出不在任何清单中的对象，不改变持久状态。
+    pub(crate) fn orphan_hashes(&self) -> Result<Vec<BlobHash>> {
+        let referenced = self.referenced_blobs()?;
+        Ok(self
+            .objects
+            .list_hashes()?
+            .difference(&referenced)
+            .copied()
+            .collect())
     }
 
     pub(crate) fn objects(&self) -> &ObjectStore {
@@ -517,14 +610,13 @@ impl Store {
     }
 
     /// 缓存是派生数据；写入失败不影响只读结果的正确性。
-    fn save_index(&self) {
+    fn save_index(&self) -> Result<()> {
         let Some(index) = self.index.as_ref() else {
-            return;
+            return Ok(());
         };
-        let Ok(encoded) = serde_json::to_vec_pretty(index) else {
-            return;
-        };
-        let _ = write_atomic(&self.index_path(), &self.root, &encoded);
+        let encoded = serde_json::to_vec_pretty(index)
+            .map_err(|error| Error::Internal(format!("cannot encode index: {error}")))?;
+        write_atomic(&self.index_path(), &self.root, &encoded)
     }
 
     fn remember(&mut self, manifest: &Manifest) {
@@ -534,72 +626,184 @@ impl Store {
             return;
         }
         self.index_cache().entries.insert(key, manifest.id);
-        self.save_index();
+        let _ = self.save_index();
     }
 
-    fn recover(&self) -> Result<()> {
-        for id in self.read_pending()? {
-            let Some(mut manifest) = self.load_manifest_optional(id)? else {
-                continue;
-            };
-            let Some(head) = manifest.head().cloned() else {
-                continue;
-            };
-            if !head.pending_apply {
-                continue;
-            }
-            let content = self.objects.get(head.blob)?;
-            crate::apply::write_target(&manifest.path, &content).map_err(|error| match error {
-                Error::Io(source) => Error::ApplyFailed {
-                    ver: head.ver,
-                    source,
-                },
-                other => other,
-            })?;
-            if let Some(new_head) = manifest.head_mut() {
-                new_head.pending_apply = false;
-            }
-            self.save_manifest(&manifest)?;
+    fn recover(&mut self) -> Result<()> {
+        for entry in self.read_pending()? {
+            self.recover_entry(&entry)?;
         }
         self.clear_pending()?;
         self.objects.cleanup_tmp()?;
         remove_dir_contents(self.root.join(TRASH_DIR).as_path())
     }
 
+    /// 恢复一条待写回记录。
+    ///
+    /// 目标内容等于新内容：只清标记。
+    /// 目标内容等于崩溃前内容或缺失：写回 pending 版本。
+    /// 目标内容既非旧值也非新值：先把外部内容记为 `salvage`，再追加一个
+    /// `revert` 版本并写回，保证不丢弃崩溃后的外部编辑。
+    fn recover_entry(&mut self, entry: &PendingEntry) -> Result<()> {
+        let Some(manifest) = self.load_manifest_optional(entry.id)? else {
+            return Ok(());
+        };
+        let Some(pending) = manifest
+            .versions
+            .iter()
+            .rev()
+            .find(|record| record.pending_apply)
+            .cloned()
+        else {
+            return Ok(());
+        };
+        let content = self.objects.get(pending.blob)?;
+        let current = read_recovery_target(&manifest.path)?;
+        let current_hash = current.as_ref().map(|bytes| hash_bytes(bytes));
+
+        if current_hash == Some(pending.blob) {
+            self.clear_pending_version(entry.id, pending.ver)?;
+            return Ok(());
+        }
+
+        let head_is_pending = manifest
+            .head()
+            .map(|head| head.ver == pending.ver)
+            .unwrap_or(false);
+        if (current.is_none() || current_hash == entry.old_blob) && head_is_pending {
+            self.apply_pending(&manifest.path, &content, pending.ver)?;
+            self.clear_pending_version(entry.id, pending.ver)?;
+            return Ok(());
+        }
+
+        if let Some(bytes) = &current
+            && current_hash != entry.old_blob
+        {
+            let manifest = self.manifest(entry.id)?;
+            let already_salvaged = manifest.head().is_some_and(|head| {
+                head.blob == hash_bytes(bytes)
+                    && head.source == Source::Salvage
+                    && head.ver > pending.ver
+            });
+            if !already_salvaged {
+                let salvage = self.prepare_commit(entry.id, bytes, Source::Salvage)?;
+                let expected = manifest.max_ver().ok_or_else(|| Error::Corrupt {
+                    what: "manifest",
+                    detail: format!("{} has no versions", entry.id),
+                })?;
+                self.commit(salvage, Some(expected))?;
+            }
+        }
+
+        self.append_revert_and_apply(
+            entry.id,
+            pending.ver,
+            current_hash,
+            &content,
+            &manifest.path,
+        )
+    }
+
+    fn append_revert_and_apply(
+        &mut self,
+        id: FileId,
+        pending_version: Ver,
+        old_blob: Option<BlobHash>,
+        content: &[u8],
+        path: &AbsPath,
+    ) -> Result<()> {
+        let manifest = self.manifest(id)?;
+        let expected = manifest.max_ver().ok_or_else(|| Error::Corrupt {
+            what: "manifest",
+            detail: format!("{id} has no versions"),
+        })?;
+        let mut prepared = self.prepare_commit(id, content, Source::Revert)?;
+        prepared.set_pending(true);
+        prepared.clear_pending(pending_version);
+        let new_version = prepared
+            .manifest()
+            .head()
+            .ok_or_else(|| Error::Corrupt {
+                what: "manifest",
+                detail: format!("{id} has no versions"),
+            })?
+            .ver;
+        self.write_pending(&[PendingEntry {
+            id,
+            version: new_version,
+            old_blob,
+            new_blob: hash_bytes(content),
+        }])?;
+        self.commit(prepared, Some(expected))?;
+        self.apply_pending(path, content, new_version)?;
+        self.finish_apply(id)
+    }
+
+    fn apply_pending(&self, path: &AbsPath, content: &[u8], version: Ver) -> Result<()> {
+        crate::apply::write_target(path, content).map_err(|error| match error {
+            Error::Io(source) => Error::ApplyFailed {
+                ver: version,
+                source,
+            },
+            Error::NotAFile { path } => Error::ApplyFailed {
+                ver: version,
+                source: io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("not a regular file: {path}"),
+                ),
+            },
+            other => other,
+        })
+    }
+
+    fn clear_pending_version(&self, id: FileId, version: Ver) -> Result<()> {
+        let mut manifest = self.manifest(id)?;
+        if let Some(record) = manifest
+            .versions
+            .iter_mut()
+            .find(|record| record.ver == version)
+            && record.pending_apply
+        {
+            record.pending_apply = false;
+            self.save_manifest(&manifest)?;
+        }
+        Ok(())
+    }
+
     fn pending_path(&self) -> AbsPath {
         self.root.join(PENDING_FILE)
     }
 
-    fn read_pending(&self) -> Result<Vec<FileId>> {
+    fn read_pending(&self) -> Result<Vec<PendingEntry>> {
         let text = match fs::read_to_string(self.pending_path().as_path()) {
             Ok(text) => text,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(error) => return Err(Error::Io(error)),
         };
-        let mut ids = Vec::new();
-        for line in text.lines() {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            let Some(id) = FileId::from_hex(line) else {
-                return Err(Error::Corrupt {
-                    what: PENDING_FILE,
-                    detail: format!("invalid file id: {line}"),
-                });
-            };
-            ids.push(id);
+        if text.trim().is_empty() {
+            return Ok(Vec::new());
         }
-        Ok(ids)
+        let file: PendingFile = serde_json::from_str(&text).map_err(|error| Error::Corrupt {
+            what: PENDING_FILE,
+            detail: error.to_string(),
+        })?;
+        if file.schema != SUPPORTED_SCHEMA {
+            return Err(Error::SchemaTooNew {
+                found: file.schema,
+                supported: SUPPORTED_SCHEMA,
+            });
+        }
+        Ok(file.entries)
     }
 
-    fn write_pending(&self, ids: &[FileId]) -> Result<()> {
-        let mut text = String::new();
-        for id in ids {
-            text.push_str(&id.to_hex());
-            text.push('\n');
-        }
-        write_atomic(&self.pending_path(), &self.root, text.as_bytes())
+    fn write_pending(&self, entries: &[PendingEntry]) -> Result<()> {
+        let file = PendingFile {
+            schema: SUPPORTED_SCHEMA,
+            entries: entries.to_vec(),
+        };
+        let encoded = serde_json::to_vec(&file)
+            .map_err(|error| Error::Internal(format!("cannot encode pending file: {error}")))?;
+        write_atomic(&self.pending_path(), &self.root, &encoded)
     }
 
     fn clear_pending(&self) -> Result<()> {
@@ -611,8 +815,19 @@ impl Store {
     }
 
     /// 标记一次写回开始；必须先于「pending=1 的清单提交」。
-    pub fn begin_apply(&self, id: FileId) -> Result<()> {
-        self.write_pending(&[id])
+    pub fn begin_apply(
+        &self,
+        id: FileId,
+        version: Ver,
+        old_blob: Option<BlobHash>,
+        new_blob: BlobHash,
+    ) -> Result<()> {
+        self.write_pending(&[PendingEntry {
+            id,
+            version,
+            old_blob,
+            new_blob,
+        }])
     }
 
     /// 写回成功后清除清单标记与 `.pending`。
@@ -709,8 +924,25 @@ impl IndexCache {
     }
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct PendingEntry {
+    id: FileId,
+    version: Ver,
+    old_blob: Option<BlobHash>,
+    new_blob: BlobHash,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct PendingFile {
+    #[serde(default)]
+    schema: u32,
+    #[serde(default)]
+    entries: Vec<PendingEntry>,
+}
+
 /// 原子写入标记：临时文件 → fsync → rename → 目录 fsync。
 fn initialize(root: &AbsPath) -> Result<Marker> {
+    remove_init_temps(root)?;
     let marker = Marker::new()?;
     let mut encoded = serde_json::to_vec_pretty(&marker)
         .map_err(|error| Error::Internal(format!("cannot encode store marker: {error}")))?;
@@ -730,7 +962,39 @@ fn ensure_layout(root: &AbsPath) -> Result<()> {
 
 fn is_empty_dir(root: &AbsPath) -> Result<bool> {
     let mut entries = fs::read_dir(root.as_path()).map_err(Error::Io)?;
-    Ok(entries.next().is_none())
+    for entry in &mut entries {
+        let entry = entry.map_err(Error::Io)?;
+        if !is_init_temp(&entry)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// 初始化标记的临时文件：崩溃可能把它们留在空目录中，不能因此拒绝整个目录。
+fn is_init_temp(entry: &fs::DirEntry) -> Result<bool> {
+    let name = entry.file_name();
+    let Some(name) = name.to_str() else {
+        return Ok(false);
+    };
+    Ok(name.starts_with("BAKON_STORE.")
+        && name.ends_with(".tmp")
+        && entry.file_type().map_err(Error::Io)?.is_file())
+}
+
+fn remove_init_temps(root: &AbsPath) -> Result<()> {
+    let entries = match fs::read_dir(root.as_path()) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(Error::Io(error)),
+    };
+    for entry in entries {
+        let entry = entry.map_err(Error::Io)?;
+        if is_init_temp(&entry)? {
+            fs::remove_file(entry.path()).map_err(Error::Io)?;
+        }
+    }
+    Ok(())
 }
 
 fn read_marker(path: &Path) -> Result<Marker> {
@@ -739,6 +1003,25 @@ fn read_marker(path: &Path) -> Result<Marker> {
         what: "store marker",
         detail: error.to_string(),
     })
+}
+
+/// 读取恢复流程的目标内容；缺失返回 `None`，非普通文件返回 `NotAFile`。
+fn read_recovery_target(path: &AbsPath) -> Result<Option<Vec<u8>>> {
+    match fs::metadata(path.as_path()) {
+        Ok(metadata) if metadata.is_file() => fs::read(path.as_path()).map(Some).map_err(Error::Io),
+        Ok(_) => Err(Error::NotAFile { path: path.clone() }),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            match fs::symlink_metadata(path.as_path()) {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    Err(Error::NotAFile { path: path.clone() })
+                }
+                Ok(_) => Ok(None),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(Error::Io(error)),
+            }
+        }
+        Err(error) => Err(Error::Io(error)),
+    }
 }
 
 #[cfg(test)]
@@ -938,6 +1221,13 @@ mod tests {
         store.index = None;
         assert_eq!(store.resolve(&file).unwrap(), Some(committed.id()));
 
+        let report = store
+            .verify(VerifyOptions {
+                fix: true,
+                size: false,
+            })
+            .unwrap();
+        assert!(report.ok());
         let index = fs::read_to_string(store.index_path().as_path()).unwrap();
         assert!(index.contains(&committed.id().to_hex()));
     }
@@ -990,11 +1280,62 @@ mod tests {
             .map(|record| record.ver.get())
             .collect();
         assert_eq!(versions, vec![3, 4]);
+        assert_eq!(
+            store.objects().list_hashes().unwrap().len(),
+            2,
+            "trimmed objects must be reclaimed"
+        );
+        assert!(store.orphan_hashes().unwrap().is_empty());
+    }
+
+    #[test]
+    fn init_cleans_a_crashed_marker_temp() {
+        let temporary = TempDir::new().unwrap();
+        let root = temporary.path().join("store");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("BAKON_STORE.1.2.3.tmp"), b"partial").unwrap();
+
+        let (store, created) = Store::init(&root).unwrap();
+
+        assert!(created);
+        assert!(root.join(MARKER_FILE).is_file());
+        assert!(!root.join("BAKON_STORE.1.2.3.tmp").exists());
+        assert_eq!(store.marker().schema, SUPPORTED_SCHEMA);
+    }
+
+    #[test]
+    fn verify_detects_and_fixes_orphan_objects() {
+        let (_temporary, mut store) = open_store();
+        let file = path("kept");
+        let baseline = store.prepare_track(&file, b"keep").unwrap();
+        store.commit(baseline, None).unwrap();
+        store.objects.put(b"orphan").unwrap();
+
+        let report = store
+            .verify(VerifyOptions {
+                fix: false,
+                size: false,
+            })
+            .unwrap();
+        assert!(
+            report.items.iter().any(|item| item.kind == "orphan_object"),
+            "{:?}",
+            report.items
+        );
+
+        let report = store
+            .verify(VerifyOptions {
+                fix: true,
+                size: false,
+            })
+            .unwrap();
+        assert!(report.ok());
+        assert!(store.orphan_hashes().unwrap().is_empty());
     }
 
     #[test]
     fn write_lock_excludes_a_second_writer() {
-        let (_temporary, store) = open_store();
+        let (_temporary, mut store) = open_store();
         let first = store.begin_write(Duration::from_millis(50)).unwrap();
         let error = store.begin_write(Duration::from_millis(50)).unwrap_err();
         assert!(matches!(error, Error::LockTimeout { .. }));
@@ -1005,7 +1346,7 @@ mod tests {
 
     #[test]
     fn recovery_clears_temporary_files_and_trash() {
-        let (_temporary, store) = open_store();
+        let (_temporary, mut store) = open_store();
         fs::write(
             store.root().join("objects/tmp/leftover.tmp").as_path(),
             b"x",
@@ -1041,7 +1382,14 @@ mod tests {
         let baseline = store.prepare_track(&tracked, b"old").unwrap();
         let committed = store.commit(baseline, None).unwrap();
 
-        store.begin_apply(committed.id()).unwrap();
+        store
+            .begin_apply(
+                committed.id(),
+                Ver::new(1).unwrap(),
+                Some(hash_bytes(b"old")),
+                hash_bytes(b"restored"),
+            )
+            .unwrap();
         let mut prepared = store
             .prepare_commit(committed.id(), b"restored", Source::Revert)
             .unwrap();
@@ -1049,7 +1397,7 @@ mod tests {
         store.commit(prepared, Some(Ver::ZERO)).unwrap();
         drop(store);
 
-        let (store, _) = Store::init(&root).unwrap();
+        let (mut store, _) = Store::init(&root).unwrap();
         let _guard = store.begin_write(Duration::from_millis(50)).unwrap();
 
         assert_eq!(fs::read(&file).unwrap(), b"restored");

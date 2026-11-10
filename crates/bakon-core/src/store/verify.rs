@@ -53,6 +53,10 @@ impl VerifyReport {
 impl Store {
     /// 检查全部清单、对象、索引与残留目录。`fix` 需要调用方持有排他锁。
     pub fn verify(&mut self, options: VerifyOptions) -> Result<VerifyReport> {
+        if options.fix && self.pending_path().as_path().exists() {
+            self.recover()?;
+        }
+
         let mut report = VerifyReport::default();
         let mut manifests = Vec::new();
 
@@ -69,6 +73,40 @@ impl Store {
             }
         }
         report.checked_files = manifests.len();
+
+        match self.read_pending() {
+            Ok(entries) if !entries.is_empty() => report.items.push(VerifyItem {
+                kind: "pending_apply",
+                path: None,
+                ver: None,
+                detail: format!("{} pending write-back record(s)", entries.len()),
+                fixed: false,
+            }),
+            Ok(_) => {}
+            Err(error) => report.items.push(VerifyItem {
+                kind: "pending_file",
+                path: None,
+                ver: None,
+                detail: error.to_string(),
+                fixed: false,
+            }),
+        }
+        for (id, manifest) in &manifests {
+            if let Some(record) = manifest
+                .versions
+                .iter()
+                .rev()
+                .find(|record| record.pending_apply)
+            {
+                report.items.push(VerifyItem {
+                    kind: "pending_version",
+                    path: Some(manifest.path.clone()),
+                    ver: Some(record.ver),
+                    detail: format!("{id} has an unapplied version"),
+                    fixed: false,
+                });
+            }
+        }
 
         let mut paths: BTreeMap<String, FileId> = BTreeMap::new();
         let mut unique_hashes: BTreeSet<BlobHash> = BTreeSet::new();
@@ -164,13 +202,28 @@ impl Store {
                     schema: crate::SUPPORTED_SCHEMA,
                     entries: expected,
                 });
-                self.save_index();
+                self.save_index()?;
             }
             report.items.push(VerifyItem {
                 kind: "index",
                 path: None,
                 ver: None,
                 detail: "index does not match manifests".into(),
+                fixed,
+            });
+        }
+
+        let orphans = self.orphan_hashes()?;
+        if !orphans.is_empty() {
+            let fixed = options.fix;
+            if fixed {
+                self.reclaim_orphans()?;
+            }
+            report.items.push(VerifyItem {
+                kind: "orphan_object",
+                path: None,
+                ver: None,
+                detail: format!("{} object(s) are not referenced", orphans.len()),
                 fixed,
             });
         }

@@ -79,6 +79,18 @@ pub enum Command {
         /// Tracked file
         file: PathBuf,
     },
+    /// List every tracked path, sorted
+    Ls,
+    /// Show mapping details for one tracked file
+    Path {
+        /// Tracked file
+        file: PathBuf,
+    },
+    /// Show the store location or its disk usage
+    Store {
+        #[arg(value_enum)]
+        action: StoreAction,
+    },
     /// Write one recorded version to stdout
     Show {
         /// Tracked file
@@ -147,6 +159,14 @@ pub enum HookAction {
     Set,
     Unset,
     Show,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum StoreAction {
+    /// Print the store root
+    Path,
+    /// Print disk usage under the store root
+    Size,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]

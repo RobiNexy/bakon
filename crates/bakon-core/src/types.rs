@@ -30,6 +30,11 @@ impl AbsPath {
                 cleaned.display()
             )));
         }
+        if cleaned.to_str().is_none() {
+            return Err(Error::Usage(
+                "path is not valid UTF-8; bakon stores paths as UTF-8 strings".into(),
+            ));
+        }
         Ok(Self(cleaned))
     }
 

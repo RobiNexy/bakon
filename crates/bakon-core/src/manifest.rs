@@ -6,6 +6,7 @@
 use std::num::NonZeroU32;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::types::{AbsPath, BlobHash, FileId, Ver};
 use crate::{Error, Result, SUPPORTED_SCHEMA};
@@ -117,6 +118,26 @@ impl Manifest {
                     detail: format!(
                         "{} versions are not strictly increasing: {} then {}",
                         self.id, pair[0].ver, pair[1].ver
+                    ),
+                });
+            }
+            if pair[0].ver.get().checked_add(1) != Some(pair[1].ver.get()) {
+                return Err(Error::Corrupt {
+                    what: "manifest",
+                    detail: format!(
+                        "{} versions are not contiguous: {} then {}",
+                        self.id, pair[0].ver, pair[1].ver
+                    ),
+                });
+            }
+        }
+        for record in &self.versions {
+            if OffsetDateTime::parse(&record.time, &Rfc3339).is_err() {
+                return Err(Error::Corrupt {
+                    what: "manifest",
+                    detail: format!(
+                        "{} version {} has an invalid timestamp: {}",
+                        self.id, record.ver, record.time
                     ),
                 });
             }
@@ -301,6 +322,22 @@ mod tests {
     fn non_increasing_versions_are_corruption() {
         let mut manifest = manifest_with(&[0, 2]);
         manifest.versions[1].ver = Ver::ZERO;
+        let error = manifest.validate().unwrap_err();
+        assert!(matches!(error, Error::Corrupt { .. }));
+    }
+
+    #[test]
+    fn version_gaps_are_corruption() {
+        let mut manifest = manifest_with(&[0, 1]);
+        manifest.versions[1].ver = Ver::new(2).unwrap();
+        let error = manifest.validate().unwrap_err();
+        assert!(matches!(error, Error::Corrupt { .. }));
+    }
+
+    #[test]
+    fn invalid_timestamps_are_corruption() {
+        let mut manifest = manifest_with(&[0]);
+        manifest.versions[0].time = "not-a-time".into();
         let error = manifest.validate().unwrap_err();
         assert!(matches!(error, Error::Corrupt { .. }));
     }

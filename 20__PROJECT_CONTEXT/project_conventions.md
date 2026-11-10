@@ -8,11 +8,10 @@
 - Run locally: `target/debug/bakon <command>` (detected)
 - Tests: `cargo test --workspace --all-targets` (detected from `.github/workflows/ci.yml`)
 - Rust lint / format: `cargo clippy --workspace --all-targets -- -D warnings` and `cargo fmt --all --check` (detected)
-- 0.x legacy: `internal/`, `main.go`, `go.mod`, and `scripts/build.sh` belong to 0.x on `main`; this branch does not change them. The Go gates in CI stay until that code is removed.
 
 ## Environments
 
-- How to tell local from test/staging from production (env vars, config files, hostnames): local only, confirmed — single-machine CLI; state lives in the store directory (`BAKON_HOME` / `BAKON_STORE`, default per `internal/config`)
+- How to tell local from test/staging from production (env vars, config files, hostnames): local only, confirmed — single-machine CLI; state lives in the store directory (`BAKON_HOME` / `BAKON_STORE`, default per `crates/bakon-cli/src/config.rs`)
 - Commands or tools that touch non-local environments (treat as high-impact): none — releases are produced by CI artifacts, not local deploys
 
 ## Git

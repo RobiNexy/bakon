@@ -3,6 +3,7 @@
 //! 契约见 `design/DATA__blob-store-and-durability.md`。对外只有两个操作：
 //! [`ObjectStore::put`] 与 [`ObjectStore::get`]，两者都幂等且不依赖历史。
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::{Read, Write};
 
@@ -86,6 +87,40 @@ impl ObjectStore {
     pub fn path(&self, hash: BlobHash) -> AbsPath {
         let text = hash.to_hex();
         self.root.join(format!("{}/{}", &text[..2], &text[2..]))
+    }
+
+    /// 列出对象库中实际存在的对象哈希；只扫描两层分片，忽略暂存区与非法文件名。
+    pub fn list_hashes(&self) -> Result<BTreeSet<BlobHash>> {
+        let mut hashes = BTreeSet::new();
+        let shards = match fs::read_dir(self.root.as_path()) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(hashes),
+            Err(error) => return Err(Error::Io(error)),
+        };
+        for shard in shards {
+            let shard = shard.map_err(Error::Io)?;
+            let Some(shard_name) = shard.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            if shard_name.len() != 2
+                || !shard_name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+                || !shard.file_type().map_err(Error::Io)?.is_dir()
+            {
+                continue;
+            }
+            for entry in fs::read_dir(shard.path()).map_err(Error::Io)? {
+                let entry = entry.map_err(Error::Io)?;
+                let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                    continue;
+                };
+                if let Some(hash) = BlobHash::from_hex(&format!("{shard_name}{name}")) {
+                    hashes.insert(hash);
+                }
+            }
+        }
+        Ok(hashes)
     }
 
     /// 清空写入暂存区；只能在持排他锁时调用。

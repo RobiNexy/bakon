@@ -699,6 +699,88 @@ fn mv_preserves_history_and_retracking_does_not_alias() {
 }
 
 #[test]
+fn ls_path_and_store_commands() {
+    let fixture = Fixture::new(b"one");
+    let editor = editor_script(fixture.temp(), "exit 0");
+    assert_eq!(fixture.edit(&editor).status.code(), Some(0));
+
+    let listed = fixture.run(&["--format", "plain", "ls"]);
+    assert_eq!(listed.status.code(), Some(0));
+    assert_eq!(stdout(&listed).trim(), fixture.file());
+
+    let details = fixture.run(&["--format", "json", "path", fixture.file()]);
+    assert_eq!(details.status.code(), Some(0));
+    assert!(
+        stdout(&details).contains("\"manifest\""),
+        "{}",
+        stdout(&details)
+    );
+
+    let root = fixture.run(&["--format", "json", "store", "path"]);
+    assert_eq!(root.status.code(), Some(0));
+    assert!(stdout(&root).contains(fixture.store()), "{}", stdout(&root));
+
+    let size = fixture.run(&["--format", "plain", "store", "size"]);
+    assert_eq!(size.status.code(), Some(0));
+    assert_eq!(stdout(&size).split('\t').count(), 3);
+}
+
+#[test]
+fn empty_prune_keeps_json_output() {
+    let fixture = Fixture::new(b"one");
+    let editor = editor_script(fixture.temp(), "exit 0");
+    assert_eq!(fixture.edit(&editor).status.code(), Some(0));
+
+    let output = fixture.run(&["--format", "json", "prune"]);
+    assert_eq!(output.status.code(), Some(0));
+    let text = stdout(&output);
+    assert!(text.trim_start().starts_with('{'), "{text}");
+    assert!(text.contains("\"files\":[]"), "{text}");
+}
+
+#[test]
+fn verify_fix_reports_an_index_write_failure() {
+    let fixture = Fixture::new(b"one");
+    let editor = editor_script(fixture.temp(), "exit 0");
+    assert_eq!(fixture.edit(&editor).status.code(), Some(0));
+
+    fs::remove_file(fixture.store.join("index.json")).unwrap();
+    fs::create_dir(fixture.store.join("index.json")).unwrap();
+
+    let output = fixture.run(&["verify", "--fix"]);
+    assert_eq!(output.status.code(), Some(8), "stderr: {}", stderr(&output));
+    assert!(fixture.store.join("index.json").is_dir());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_non_utf8_path_is_a_usage_error() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let fixture = Fixture::new(b"one");
+    let name = OsString::from_vec(b"bad\xff".to_vec());
+    let path = fixture.temp().join(name);
+    fs::write(&path, b"data").unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_bakon"))
+        .env_remove("BAKON_STORE")
+        .env_remove("BAKON_HOME")
+        .env_remove("VISUAL")
+        .env(
+            "BAKON_CONFIG",
+            std::env::temp_dir().join("bakon-tests-no-config.toml"),
+        )
+        .args(["--store", fixture.store()])
+        .arg("edit")
+        .arg(&path)
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(2), "stderr: {}", stderr(&output));
+}
+
+#[test]
 fn verify_reports_and_fixes_derived_data() {
     let fixture = Fixture::new(b"one");
     let editor = editor_script(fixture.temp(), "printf 'two' > \"$1\"");

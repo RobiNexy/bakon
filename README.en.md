@@ -16,7 +16,7 @@ v1 is implemented in Rust with its own content-addressed store. It does not call
 - Global retention limit, per-file hooks, atomic writes, write locking, and crash recovery
 - One binary with no runtime dependencies
 
-The `v1-rust` branch is the v1 line; `main` keeps the 0.x (Go + Git) history.
+The current implementation is v1 (Rust). The 0.x Go implementation has been removed from the tree and remains only in history and old tags.
 
 ## Build and install
 
@@ -57,6 +57,9 @@ The first `edit` tracks the file and saves its pre-edit content as version 0.
 | `bakon version` | Print the program version and build target |
 | `bakon edit <file>` | Open the editor; append a version when the content changed |
 | `bakon log <file>` | List versions, newest first |
+| `bakon ls` | List every tracked path, sorted |
+| `bakon path <file>` | Show the path, identity, and manifest location |
+| `bakon store <path\|size>` | Show the store root or disk usage |
 | `bakon show <file> <ver>` | Write one version's raw content to stdout |
 | `bakon dump <file> <ver>` | Same as `show`, kept as a pipeline-friendly name |
 | `bakon diff <file> [v1] [v2]` | Compare versions; no arguments compares the last two, one compares with its predecessor |
@@ -93,7 +96,9 @@ store/
 └── trash/               objects awaiting deletion
 ```
 
-Manifests are the only source of version facts. Objects are named by content hash and deduplicated. Back up by copying the whole store directory; run `bakon verify` after restoring. An inconsistent store exits 6; `--fix` repairs only size fields, the index, and leftover directories, never guessed history.
+Manifests are the only source of version facts. Objects are named by content hash and deduplicated. Back up by copying the whole store directory; run `bakon verify` after restoring. An inconsistent store exits 6; `--fix` repairs only size fields, the index, leftover directories, and orphan objects, never guessed history.
+
+Crash recovery is driven by `.pending`, which records the target hash before write-back and the hash of the content to apply. If the target was changed from outside after a crash, recovery first records that content as `salvage`, then appends a new `revert` and applies it; `verify` reports unfinished write-backs.
 
 v1 does not read 0.x's `~/.bakon/repo` and does not migrate automatically. The old directory and old binary can coexist; export with 0.x before switching if you need that history.
 

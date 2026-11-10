@@ -136,6 +136,90 @@ fn write_editor(temporary: &TempDir, body: &str) -> PathBuf {
 }
 
 #[test]
+fn init_survives_a_crash_before_the_marker_rename() {
+    let case = Case::new(b"x");
+    let crashed = case
+        .command(&["init"])
+        .env("BAKON_TEST_CRASH_AFTER", "1")
+        .output()
+        .unwrap();
+    assert_eq!(crashed.status.code(), Some(CRASH_EXIT));
+
+    let again = case.run(&["init"]);
+    assert_eq!(
+        again.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&again.stderr)
+    );
+    assert!(case.store.join("BAKON_STORE").is_file());
+}
+
+fn case_with_pending_revert() -> Case {
+    for limit in 1..=30 {
+        let case = Case::new(b"one");
+        case.track();
+        let changed = case.editor("printf 'two' > \"$1\"");
+        assert_eq!(case.edit(&changed).status.code(), Some(0));
+
+        let crashed = case.crash_revert(0, limit);
+        if crashed.status.code() != Some(CRASH_EXIT) {
+            break;
+        }
+        if case.store.join(".pending").exists() && has_pending_flag(&case.store) {
+            return case;
+        }
+    }
+    panic!("no crash point left a pending write-back");
+}
+
+fn has_pending_flag(store: &Path) -> bool {
+    let files = store.join("files");
+    let Ok(entries) = fs::read_dir(files) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.ends_with(".json"))
+            && fs::read_to_string(entry.path())
+                .map(|text| text.contains("\"pending_apply\": true"))
+                .unwrap_or(false)
+    })
+}
+
+#[test]
+fn verify_reports_a_pending_write_back() {
+    let case = case_with_pending_revert();
+    let output = case.run(&["verify"]);
+    assert_eq!(output.status.code(), Some(6));
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(text.contains("pending"), "{text}");
+}
+
+#[test]
+fn recovery_salvages_an_edit_made_after_a_crash() {
+    let case = case_with_pending_revert();
+    fs::write(&case.file, b"external edit").unwrap();
+
+    let noop = case.editor("exit 0");
+    let output = case.edit(&noop);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert_eq!(fs::read(&case.file).unwrap(), b"one");
+    let log = case.log();
+    assert!(log.contains("\tsalvage"), "{log}");
+    assert!(log.contains("\trevert"), "{log}");
+    case.recover();
+}
+
+#[test]
 fn edit_survives_a_crash_at_every_durability_point() {
     let mut observed = 0;
     for limit in 1..=20 {

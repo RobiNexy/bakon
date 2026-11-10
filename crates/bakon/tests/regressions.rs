@@ -270,6 +270,8 @@ fn f6_a_lost_index_does_not_lose_tracking() {
     let output = case.run(&["log", case.file()]);
 
     assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    let fixed = case.run(&["verify", "--fix"]);
+    assert_eq!(fixed.status.code(), Some(0), "stderr: {}", stderr(&fixed));
     assert!(case.store.join("index.json").is_file());
 }
 

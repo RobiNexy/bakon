@@ -1,5 +1,6 @@
 //! 命令实现：I/O、输出格式与事务编排。语义判断全部委托给 `bakon-core`。
 
+use std::collections::BTreeSet;
 use std::env;
 use std::fs;
 use std::io::{self, Write};
@@ -13,7 +14,7 @@ use bakon_core::object::hash_bytes;
 use bakon_core::store::VerifyOptions;
 use bakon_core::{AbsPath, Error, Result, Store, Ver};
 
-use crate::cli::{Cli, ConfigAction, Format, HookAction};
+use crate::cli::{Cli, ConfigAction, Format, HookAction, StoreAction};
 use crate::config::{self, Config};
 
 pub fn init(cli: &Cli) -> Result<u8> {
@@ -138,6 +139,8 @@ pub fn revert(cli: &Cli, file: &Path, version: u32, force: bool, no_hook: bool) 
             detail: format!("{id} has no versions"),
         })?;
         let current = read_if_exists(&path)?;
+        let old_blob = current.as_ref().map(|bytes| hash_bytes(bytes));
+        let new_blob = hash_bytes(&target_content);
         let diverged = current
             .as_ref()
             .is_some_and(|bytes| hash_bytes(bytes) != head.blob);
@@ -168,9 +171,17 @@ pub fn revert(cli: &Cli, file: &Path, version: u32, force: bool, no_hook: bool) 
                 .map_err(|error| applied(error, head.ver))?;
             (None, manifest, previous)
         } else {
-            store.begin_apply(id)?;
             let mut prepared = store.prepare_commit(id, &target_content, Source::Revert)?;
             prepared.set_pending(true);
+            let pending_version = prepared
+                .manifest()
+                .head()
+                .ok_or_else(|| Error::Corrupt {
+                    what: "manifest",
+                    detail: format!("{id} has no versions"),
+                })?
+                .ver;
+            store.begin_apply(id, pending_version, old_blob, new_blob)?;
             let committed = store.commit(prepared, Some(head.ver))?;
             apply::write_target(&path, &target_content)
                 .map_err(|error| applied(error, committed.version()))?;
@@ -222,7 +233,13 @@ pub fn prune(cli: &Cli, file: Option<&Path>, dry_run: bool) -> Result<u8> {
     let report = store.prune(&ids, dry_run)?;
 
     if report.files.is_empty() {
-        emit("nothing to prune")?;
+        match cli.format {
+            Format::Human => emit("nothing to prune")?,
+            Format::Plain => {}
+            Format::Json => {
+                emit(&serde_json::json!({ "files": [], "dry_run": dry_run }).to_string())?
+            }
+        }
     }
     for file in &report.files {
         match cli.format {
@@ -520,6 +537,124 @@ pub fn log(cli: &Cli, file: &Path) -> Result<u8> {
     Ok(0)
 }
 
+/// `ls`：列出全部被管理路径，按路径排序。
+pub fn ls(cli: &Cli) -> Result<u8> {
+    let store = open_store(cli)?;
+    let _guard = store.lock_shared(lock_timeout(cli))?;
+    let mut paths = BTreeSet::new();
+    for id in store.all_ids()? {
+        paths.insert(store.manifest(id)?.path);
+    }
+    for path in paths {
+        match cli.format {
+            Format::Human | Format::Plain => emit(&path.as_path().to_string_lossy())?,
+            Format::Json => {
+                emit(&serde_json::json!({ "path": path.as_path().to_string_lossy() }).to_string())?
+            }
+        }
+    }
+    Ok(0)
+}
+
+/// `path`：输出路径、稳定身份与清单文件位置。
+pub fn path(cli: &Cli, file: &Path) -> Result<u8> {
+    let path = AbsPath::new(file)?;
+    let mut store = open_store(cli)?;
+    let _guard = store.lock_shared(lock_timeout(cli))?;
+    let id = store
+        .resolve(&path)?
+        .ok_or_else(|| Error::NotManaged(path.clone()))?;
+    let manifest = store.manifest_path(id);
+    match cli.format {
+        Format::Human => emit(&format!(
+            "path:     {path}\nid:       {id}\nmanifest: {}",
+            manifest.as_path().display()
+        ))?,
+        Format::Plain => emit(&format!(
+            "{}\t{}\t{}",
+            path.as_path().display(),
+            id,
+            manifest.as_path().display()
+        ))?,
+        Format::Json => emit(
+            &serde_json::json!({
+                "path": path.as_path().to_string_lossy(),
+                "id": id.to_hex(),
+                "manifest": manifest.as_path().to_string_lossy(),
+            })
+            .to_string(),
+        )?,
+    }
+    Ok(0)
+}
+
+/// `store`：输出存储根目录或磁盘占用。
+pub fn store(cli: &Cli, action: StoreAction) -> Result<u8> {
+    let store = open_store(cli)?;
+    let _guard = store.lock_shared(lock_timeout(cli))?;
+    match action {
+        StoreAction::Path => match cli.format {
+            Format::Human => emit(&format!("store: {}", store.root().as_path().display()))?,
+            Format::Plain => emit(&store.root().as_path().display().to_string())?,
+            Format::Json => emit(
+                &serde_json::json!({
+                    "store": store.root().as_path().to_string_lossy(),
+                    "schema": store.marker().schema,
+                })
+                .to_string(),
+            )?,
+        },
+        StoreAction::Size => {
+            let (bytes, files) = tree_size(store.root().as_path())?;
+            match cli.format {
+                Format::Human => emit(&format!(
+                    "store: {}\nbytes: {bytes}\nfiles: {files}",
+                    store.root().as_path().display()
+                ))?,
+                Format::Plain => emit(&format!(
+                    "{}\t{bytes}\t{files}",
+                    store.root().as_path().display()
+                ))?,
+                Format::Json => emit(
+                    &serde_json::json!({
+                        "store": store.root().as_path().to_string_lossy(),
+                        "bytes": bytes,
+                        "files": files,
+                    })
+                    .to_string(),
+                )?,
+            }
+        }
+    }
+    Ok(0)
+}
+
+fn tree_size(root: &Path) -> Result<(u64, u64)> {
+    fn walk(path: &Path, bytes: &mut u64, files: &mut u64) -> io::Result<()> {
+        let entries = match fs::read_dir(path) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        for entry in entries {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
+                walk(&entry.path(), bytes, files)?;
+            } else if file_type.is_file() {
+                *bytes += entry.metadata()?.len();
+                *files += 1;
+            }
+        }
+        Ok(())
+    }
+
+    let mut bytes = 0;
+    let mut files = 0;
+    walk(root, &mut bytes, &mut files).map_err(Error::Io)?;
+    Ok((bytes, files))
+}
+
 /// `show` / `dump`：原始字节，不加换行。
 pub fn show(cli: &Cli, file: &Path, version: u32) -> Result<u8> {
     let path = AbsPath::new(file)?;
@@ -688,6 +823,13 @@ fn read_if_exists(path: &AbsPath) -> Result<Option<Vec<u8>>> {
 fn applied(error: Error, ver: Ver) -> Error {
     match error {
         Error::Io(source) => Error::ApplyFailed { ver, source },
+        Error::NotAFile { path } => Error::ApplyFailed {
+            ver,
+            source: io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("not a regular file: {path}"),
+            ),
+        },
         other => other,
     }
 }

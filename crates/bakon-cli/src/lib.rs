@@ -10,7 +10,6 @@ use std::process::ExitCode;
 
 use bakon_core::Result;
 use cli::{Cli, Command};
-
 /// 解析参数、执行命令并返回进程退出码。
 pub fn run() -> ExitCode {
     let cli = Cli::parse_args();
@@ -35,6 +34,9 @@ fn dispatch(cli: &Cli) -> Result<u8> {
             no_hook,
         } => commands::revert(cli, file, *ver, *force, *no_hook),
         Command::Log { file } => commands::log(cli, file),
+        Command::Ls => commands::ls(cli),
+        Command::Path { file } => commands::path(cli, file),
+        Command::Store { action } => commands::store(cli, *action),
         Command::Show { file, ver } | Command::Dump { file, ver } => {
             commands::show(cli, file, *ver)
         }
