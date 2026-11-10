@@ -34,6 +34,7 @@ You are an agent helping maintain this project. This is the only entry point. Lo
 | Tidy the knowledge base, or `journal/` has more than 20 entries | [[AGENT__procedure__compaction]] |
 | Work in a freshly installed project | [[AGENT__procedure__first_session]] |
 | Touch deployment, infrastructure, or anything on the path to production | [[AGENT__procedure__production_readiness]] |
+| Change the build, CI, release, or rollback path | [[AGENT__procedure__change-path]] |
 
 ## Naming is the index
 
