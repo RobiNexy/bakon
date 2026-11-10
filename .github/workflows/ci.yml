@@ -50,6 +50,26 @@ jobs:
       - name: cargo check
         run: cargo check --workspace --target ${{ matrix.target }}
 
+  native-smoke:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: build
+        run: cargo build -p bakon
+      - name: version
+        shell: bash
+        run: ./target/debug/bakon version
+      - name: init and verify
+        shell: bash
+        run: |
+          ./target/debug/bakon --store ./ci-store init
+          ./target/debug/bakon --store ./ci-store init
+          ./target/debug/bakon --store ./ci-store verify
+
   cross-build:
     runs-on: ubuntu-latest
     steps:
