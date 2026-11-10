@@ -4,6 +4,9 @@
 
 <!-- One line per task. Link an existing design file when one applies; mark blockers with Q-<topic>. Remove the reference when the question is resolved. Empty is fine. -->
 
+> 审计来源：[[design-audit-2026-11-10]]，下列 F 编号与其 §4 对应。
+
+
 - P0 `internal/gitx`.Init 以 `--is-inside-work-tree` 判定仓库存在：store 在既有仓库内时提交写入外层仓库；store 在既有仓库根时，prune 重写该系统仓库历史并丢弃多文件提交中的其余路径（实测丢文件）— blocked by Q-repo-identity
 - P0 revert 先写回后提交：提交失败时目标已被替换且无版本记录；写回用 rename，覆盖符号链接并更换 inode
 - P0 `GIT_DIR` / `GIT_WORK_TREE` 未净化：指向别处时静默读到空历史或提交进错误仓库
