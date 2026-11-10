@@ -1,0 +1,18 @@
+[package]
+name = "bakon"
+description = "Local version history for single files"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+default-run = "bakon"
+
+[dependencies]
+bakon-cli.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

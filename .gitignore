@@ -1,4 +1,5 @@
 /dist/
+/target/
 /bakon
 *.test
 *.out

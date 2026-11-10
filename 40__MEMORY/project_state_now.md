@@ -6,7 +6,7 @@
 
 - 当前可运行实现是 0.x：Go + git 后端，功能完整，位于 `internal/`。2026-11-10 的形式化审计发现 13 项缺陷（[[design-audit-2026-11-10]]），其中 4 项可造成数据损坏。
 - 已决定放弃 git 后端，用 Rust 重写 v1：[[ADR__replace-git-with-own-content-addressed-store]]、[[ADR__rewrite-in-rust]]。
-- v1 的形式论证与详细设计已完成，代码尚未开始，处于 M0 之前。设计入口：[[MODULE__bakon-v1-design]]（含文档地图、阶段划分、验收判据）。
+- v1 形式论证与详细设计已完成；M0 已落地在 `crates/`（Rust 工作区、三个 crate、错误码模型、标记与存储打开），`bakon version` 与 `bakon init` 可用。设计入口：[[MODULE__bakon-v1-design]]（含文档地图、阶段划分、验收判据）。
 - 0.x 不再接受独立缺陷修复，除非 v1 延期；旧 `repo/` 不被读取也不被删除。
 
 ## Known limitations
