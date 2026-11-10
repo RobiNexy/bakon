@@ -7,13 +7,10 @@ use serde::{Deserialize, Serialize};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::types::uuid;
-use crate::{Error, Result};
+use crate::{Error, Result, SUPPORTED_SCHEMA};
 
 /// 标记文件名。
 pub const MARKER_FILE: &str = "BAKON_STORE";
-
-/// 本程序支持的存储 schema。
-pub const SUPPORTED_SCHEMA: u32 = 1;
 
 /// 写入标记的工具标识，形如 `bakon/1.0`。
 pub const TOOL_ID: &str = concat!(
@@ -36,13 +33,10 @@ pub struct Marker {
 impl Marker {
     /// 为新存储生成标记。
     pub fn new() -> Result<Self> {
-        let created = OffsetDateTime::now_utc()
-            .format(&Rfc3339)
-            .map_err(|error| Error::Internal(format!("cannot format timestamp: {error}")))?;
         Ok(Self {
             schema: SUPPORTED_SCHEMA,
             uuid: uuid::format(&uuid::v4_bytes()),
-            created,
+            created: crate::clock::now_rfc3339()?,
             tool: TOOL_ID.to_owned(),
         })
     }

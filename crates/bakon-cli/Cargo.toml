@@ -12,6 +12,7 @@ build = "build.rs"
 bakon-core.workspace = true
 clap.workspace = true
 serde_json.workspace = true
+similar.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

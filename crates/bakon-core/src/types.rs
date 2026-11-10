@@ -1,10 +1,12 @@
 //! 核心类型：绝对路径、文件身份、版本号与内容哈希。
 //!
-//! 四个 newtype 之间没有隐式转换（也刻意不提供 `FromStr`），编译器因此能阻止
-//! 把路径、身份、版本号与哈希混用。约束见 `design/API__store-contract-and-cli.md` §1。
+//! 四个 newtype 之间没有隐式转换，编译器因此能阻止把路径、身份、版本号与哈希
+//! 混用。约束见 `design/API__store-contract-and-cli.md` §1。
 
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
+
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::{Error, Result};
 
@@ -53,6 +55,26 @@ impl AsRef<Path> for AbsPath {
     }
 }
 
+impl Serialize for AbsPath {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        let text = self
+            .0
+            .to_str()
+            .ok_or_else(|| serde::ser::Error::custom("path is not valid UTF-8"))?;
+        serializer.serialize_str(text)
+    }
+}
+
+impl<'de> Deserialize<'de> for AbsPath {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        if !Path::new(&text).is_absolute() {
+            return Err(serde::de::Error::custom("stored path is not absolute"));
+        }
+        Self::new(&text).map_err(serde::de::Error::custom)
+    }
+}
+
 /// 词法清理：去掉 `.`，折叠 `..`，不解析符号链接。
 fn clean(path: &Path) -> PathBuf {
     let mut cleaned = PathBuf::new();
@@ -87,24 +109,47 @@ impl FileId {
     pub fn as_bytes(&self) -> &[u8; 16] {
         &self.0
     }
+
+    /// 32 位小写十六进制；清单文件以它命名。
+    pub fn to_hex(self) -> String {
+        hex_encode(&self.0)
+    }
+
+    /// 从 32 位小写十六进制解析；仅用于清单文件名与反序列化。
+    pub(crate) fn from_hex(text: &str) -> Option<Self> {
+        hex_decode::<16>(text).map(Self)
+    }
 }
 
 impl fmt::Display for FileId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&uuid::format(&self.0))
+        f.write_str(&hex_encode(&self.0))
     }
 }
 
-/// 单调版本号，只能由 [`Ver::next`] 递增产生。
+impl Serialize for FileId {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(&hex_encode(&self.0))
+    }
+}
+
+impl<'de> Deserialize<'de> for FileId {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        Self::from_hex(&text).ok_or_else(|| serde::de::Error::custom("invalid file id"))
+    }
+}
+
+/// 单调版本号。首个版本是 0；此后只能由 [`Ver::next`] 递增产生。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Ver(u32);
 
 impl Ver {
-    /// 构造一个已知版本号；0 不是合法版本。
+    /// 首个版本号。
+    pub const ZERO: Self = Self(0);
+
+    /// 由外部输入（命令行参数或反序列化）构造；不作为生成新版本的入口。
     pub fn new(value: u32) -> Result<Self> {
-        if value == 0 {
-            return Err(Error::Internal("version numbers start at 1".into()));
-        }
         Ok(Self(value))
     }
 
@@ -127,6 +172,19 @@ impl fmt::Display for Ver {
     }
 }
 
+impl Serialize for Ver {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_u32(self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for Ver {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        let value = u32::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
+    }
+}
+
 /// 内容哈希（SHA-256）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct BlobHash([u8; 32]);
@@ -139,15 +197,58 @@ impl BlobHash {
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
+
+    pub fn to_hex(self) -> String {
+        hex_encode(&self.0)
+    }
+
+    pub(crate) fn from_hex(text: &str) -> Option<Self> {
+        hex_decode::<32>(text).map(Self)
+    }
 }
 
 impl fmt::Display for BlobHash {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for byte in self.0 {
-            write!(f, "{byte:02x}")?;
-        }
-        Ok(())
+        f.write_str(&hex_encode(&self.0))
     }
+}
+
+impl Serialize for BlobHash {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(&hex_encode(&self.0))
+    }
+}
+
+impl<'de> Deserialize<'de> for BlobHash {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        Self::from_hex(&text).ok_or_else(|| serde::de::Error::custom("invalid blob hash"))
+    }
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut text = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        text.push_str(&format!("{byte:02x}"));
+    }
+    text
+}
+
+fn hex_decode<const N: usize>(text: &str) -> Option<[u8; N]> {
+    if text.len() != N * 2
+        || !text
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return None;
+    }
+    let mut bytes = [0_u8; N];
+    let (pairs, _remainder) = text.as_bytes().as_chunks::<2>();
+    for (index, pair) in pairs.iter().enumerate() {
+        let pair = std::str::from_utf8(pair).ok()?;
+        bytes[index] = u8::from_str_radix(pair, 16).ok()?;
+    }
+    Some(bytes)
 }
 
 pub(crate) mod uuid {
@@ -217,20 +318,25 @@ mod tests {
     }
 
     #[test]
-    fn file_ids_are_unique_and_formatted_as_uuid_v4() {
+    fn file_ids_are_unique_and_formatted_as_hex() {
         let first = FileId::generate();
         let second = FileId::generate();
         assert_ne!(first, second);
-        let text = first.to_string();
-        assert!(uuid::is_valid(&text), "unexpected format: {text}");
-        assert_eq!(text.as_bytes()[14], b'4');
+        assert_eq!(first.to_string().len(), 32);
+        assert!(
+            first
+                .to_string()
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        );
+        assert_eq!(FileId::from_hex(&first.to_string()), Some(first));
     }
 
     #[test]
-    fn versions_only_grow() {
-        let head = Ver::new(7).unwrap();
-        assert_eq!(Ver::next(head).unwrap().get(), 8);
-        assert!(Ver::new(0).is_err());
+    fn versions_start_at_zero_and_only_grow() {
+        let zero = Ver::new(0).unwrap();
+        assert_eq!(zero.get(), 0);
+        assert_eq!(Ver::next(zero).unwrap().get(), 1);
         assert!(Ver::next(Ver::new(u32::MAX).unwrap()).is_err());
     }
 
@@ -243,5 +349,16 @@ mod tests {
             text.bytes()
                 .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
         );
+    }
+
+    #[test]
+    fn ids_and_hashes_round_trip_through_json() {
+        let id = FileId::generate();
+        let text = serde_json::to_string(&id).unwrap();
+        assert_eq!(serde_json::from_str::<FileId>(&text).unwrap(), id);
+
+        let hash = BlobHash::from_bytes([7; 32]);
+        let text = serde_json::to_string(&hash).unwrap();
+        assert_eq!(serde_json::from_str::<BlobHash>(&text).unwrap(), hash);
     }
 }

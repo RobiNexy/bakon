@@ -18,8 +18,12 @@ pub enum Error {
     NotManaged(AbsPath),
     /// 目标文件不存在。
     NotFound(AbsPath),
+    /// 目标存在但不是普通文件。
+    NotAFile { path: AbsPath },
     /// 请求的版本号不存在。
     NoSuchVersion { ver: Ver, latest: Ver },
+    /// 请求的版本没有前一版。
+    NoPreviousVersion { ver: Ver },
     /// 请求的版本已被裁剪。
     Pruned { ver: Ver, oldest: Ver },
     /// 等待存储锁超时。
@@ -33,6 +37,8 @@ pub enum Error {
     HeadChanged { expected: Ver, actual: Ver },
     /// 钩子执行失败。
     HookFailed { ver: Ver, status: i32 },
+    /// 编辑器以非零状态退出。
+    EditorFailed { status: i32 },
     /// 目标目录存在且非空，但不是 bakon 存储。
     NotAStore { root: AbsPath },
     /// 存储 schema 高于本程序支持的版本。
@@ -56,10 +62,12 @@ impl Error {
             Self::Usage(_) => 2,
             Self::NotManaged(_)
             | Self::NotFound(_)
+            | Self::NotAFile { .. }
             | Self::NoSuchVersion { .. }
+            | Self::NoPreviousVersion { .. }
             | Self::Pruned { .. } => 3,
             Self::LockTimeout { .. } | Self::Diverged { .. } | Self::HeadChanged { .. } => 4,
-            Self::HookFailed { .. } => 5,
+            Self::HookFailed { .. } | Self::EditorFailed { .. } => 5,
             Self::NotAStore { .. }
             | Self::SchemaTooNew { .. }
             | Self::SchemaTooOld { .. }
@@ -77,12 +85,18 @@ impl fmt::Display for Error {
             Self::Usage(message) => write!(f, "{message}"),
             Self::NotManaged(path) => write!(f, "not managed: {}", path.as_path().display()),
             Self::NotFound(path) => write!(f, "no such file: {}", path.as_path().display()),
+            Self::NotAFile { path } => {
+                write!(f, "not a regular file: {}", path.as_path().display())
+            }
             Self::NoSuchVersion { ver, latest } => {
                 write!(
                     f,
                     "version {} does not exist (latest is {latest})",
                     ver.get()
                 )
+            }
+            Self::NoPreviousVersion { ver } => {
+                write!(f, "version {} has no previous version", ver.get())
             }
             Self::Pruned { ver, oldest } => {
                 write!(
@@ -119,6 +133,7 @@ impl fmt::Display for Error {
                     ver.get()
                 )
             }
+            Self::EditorFailed { status } => write!(f, "editor failed with status {status}"),
             Self::NotAStore { root } => write!(
                 f,
                 "{} is not a bakon store (missing {marker})",
@@ -179,10 +194,17 @@ mod tests {
             (Error::Usage("bad flag".into()), 2),
             (Error::NotManaged(path()), 3),
             (Error::NotFound(path()), 3),
+            (Error::NotAFile { path: path() }, 3),
             (
                 Error::NoSuchVersion {
                     ver: Ver::new(9).unwrap(),
                     latest: Ver::new(3).unwrap(),
+                },
+                3,
+            ),
+            (
+                Error::NoPreviousVersion {
+                    ver: Ver::new(0).unwrap(),
                 },
                 3,
             ),
@@ -221,6 +243,7 @@ mod tests {
                 },
                 5,
             ),
+            (Error::EditorFailed { status: 1 }, 5),
             (Error::NotAStore { root: path() }, 6),
             (
                 Error::SchemaTooNew {

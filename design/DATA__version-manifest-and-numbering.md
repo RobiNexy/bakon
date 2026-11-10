@@ -73,12 +73,12 @@
 
 ## 5. 保留语义
 
-`max_versions` 的三态：
+`retention.max_versions` 的三态（`retention` 对象整体缺失等价于继承）：
 
 | 值 | 语义 |
 |---|---|
-| 字段缺失 | 继承全局 `retention.max_versions` |
-| `0` | 不限制，显式覆盖全局 |
+| `retention` 缺失 | 继承全局 `retention.max_versions` |
+| `retention.max_versions = 0` | 不限制，显式覆盖全局 |
 | $n > 0$ | 保留最新 $n$ 个版本 |
 
 0.x 的实现用 `> 0` 判断是否覆盖，导致 `0` 无法表达「不限制」（F9）。v1 用 `Option<u32>`，三态在类型上可区分。

@@ -19,6 +19,10 @@ pub struct Cli {
     #[arg(long, global = true, value_enum, default_value = "human")]
     pub format: Format,
 
+    /// Milliseconds to wait for the store lock
+    #[arg(long, global = true, value_name = "MS", default_value_t = 2000)]
+    pub lock_timeout: u64,
+
     #[command(subcommand)]
     pub command: Command,
 }
@@ -45,4 +49,37 @@ pub enum Command {
     Init,
     /// Print the program version and build target
     Version,
+    /// Track a file on first use, then record the content saved by the editor
+    Edit {
+        /// File to edit
+        file: PathBuf,
+    },
+    /// List recorded versions, newest first
+    Log {
+        /// Tracked file
+        file: PathBuf,
+    },
+    /// Write one recorded version to stdout
+    Show {
+        /// Tracked file
+        file: PathBuf,
+        /// Version number
+        ver: u32,
+    },
+    /// Same as show; kept as a pipeline-friendly name
+    Dump {
+        /// Tracked file
+        file: PathBuf,
+        /// Version number
+        ver: u32,
+    },
+    /// Show a unified diff between recorded versions
+    Diff {
+        /// Tracked file
+        file: PathBuf,
+        /// Older version; defaults to the previous version
+        first: Option<u32>,
+        /// Newer version; defaults to the latest version
+        second: Option<u32>,
+    },
 }

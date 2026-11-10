@@ -19,7 +19,7 @@ pub struct BlobHash([u8; 32]);    // 内容哈希
 - 四个类型之间没有隐式转换，编译期阻止混用。
 
 ```rust
-pub enum Retention { Inherit, Unlimited, Limit(NonZeroU32) }  // JSON: 缺省 / 0 / n
+pub enum Retention { Inherit, Unlimited, Limit(NonZeroU32) }  // JSON: 字段缺省 / {"max_versions":0} / {"max_versions":n}
 pub enum Source { Baseline, Edit, Revert, Salvage }           // JSON: 小写字符串
 pub enum Codec { Deflate }
 ```
@@ -31,12 +31,19 @@ pub struct Prepared { manifest: Manifest, content: Vec<u8> }
 pub struct Committed { id: FileId, version: Ver }
 
 impl Store {
+    /// 构造纳管提交：生成身份与基线版本。
+    pub fn prepare_track(&self, path: &AbsPath, content: &[u8]) -> Result<Prepared>;
+
+    /// 构造追加提交：版本号与时间在这里生成。
+    pub fn prepare_commit(&self, id: FileId, content: &[u8], source: Source) -> Result<Prepared>;
+
     /// 写入对象与清单，返回提交结果。失败时持久状态或为旧值或为新值。
-    pub fn commit(&mut self, p: Prepared) -> Result<Committed>;
+    /// `expected_head` 是进入编辑器前读到的 head；不一致即冲突退出。
+    pub fn commit(&mut self, prepared: Prepared, expected_head: Option<Ver>) -> Result<Committed>;
 }
 
 impl Committed {
-    /// 只有已提交的版本才能写回目标文件。
+    /// 只有已提交的版本才能写回目标文件（M2）。
     pub fn apply(self, target: &AbsPath, policy: ApplyPolicy) -> Result<()>;
 }
 ```
@@ -66,7 +73,10 @@ impl Committed {
 ```rust
 pub enum Error {
     NotManaged(AbsPath),
+    NotFound(AbsPath),
+    NotAFile { path: AbsPath },
     NoSuchVersion { ver: Ver, latest: Ver },
+    NoPreviousVersion { ver: Ver },
     Pruned { ver: Ver, oldest: Ver },
     LockTimeout { holder: Option<u32>, waited: Duration },
     Diverged { path: AbsPath, hint: &'static str },
@@ -74,7 +84,11 @@ pub enum Error {
     Corrupt { what: &'static str, detail: String },
     ApplyFailed { ver: Ver, source: io::Error },
     Io(io::Error),
-    HookFailed { ver: Ver, status: ExitStatus },
+    HookFailed { ver: Ver, status: i32 },
+    EditorFailed { status: i32 },
+    NotAStore { root: AbsPath },
+    SchemaTooNew { found: u32, supported: u32 },
+    SchemaTooOld { found: u32, supported: u32 },
     Internal(String),
 }
 ```
@@ -103,6 +117,8 @@ pub enum Error {
 | `bakon store <path\|size>` | — | 存储位置与占用汇总 |
 
 全局：`--store`、`--config`、`--format human|plain|json`、`--no-color`、`--no-hook`、`--lock-timeout`。
+
+`edit` 的编辑器取 `$VISUAL` → `$EDITOR` → `vi`；`config.editor` 在 M2 接入。诊断与进度走 stderr，stdout 只放数据。
 
 ## 6. 输出格式
 
