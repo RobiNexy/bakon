@@ -787,8 +787,14 @@ impl Store {
             what: PENDING_FILE,
             detail: error.to_string(),
         })?;
-        if file.schema != SUPPORTED_SCHEMA {
+        if file.schema > SUPPORTED_SCHEMA {
             return Err(Error::SchemaTooNew {
+                found: file.schema,
+                supported: SUPPORTED_SCHEMA,
+            });
+        }
+        if file.schema < SUPPORTED_SCHEMA {
+            return Err(Error::SchemaTooOld {
                 found: file.schema,
                 supported: SUPPORTED_SCHEMA,
             });

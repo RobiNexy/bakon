@@ -27,6 +27,7 @@
 | 接口、CLI、退出码 | [[API__store-contract-and-cli]] |
 | 重构前的缺陷清单 | [[design-audit-2026-11-10]] |
 | v1 设计与实现的再次形式化审计 | [[design-audit-v1-2026-11-10]] |
+| v1 修复后的复核 | [[design-audit-v1-2026-11-10-recheck]] |
 
 ## 3. 架构
 

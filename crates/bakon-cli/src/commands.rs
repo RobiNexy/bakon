@@ -11,7 +11,7 @@ use std::time::Duration;
 use bakon_core::apply;
 use bakon_core::manifest::{Manifest, Source, VersionRecord};
 use bakon_core::object::hash_bytes;
-use bakon_core::store::VerifyOptions;
+use bakon_core::store::{Committed, VerifyOptions};
 use bakon_core::{AbsPath, Error, Result, Store, Ver};
 
 use crate::cli::{Cli, ConfigAction, Format, HookAction, StoreAction};
@@ -75,6 +75,7 @@ pub fn edit(cli: &Cli, file: &Path, no_hook: bool) -> Result<u8> {
                 let content = read_target(&path)?;
                 let prepared = store.prepare_track(&path, &content)?;
                 let committed = store.commit(prepared, None)?;
+                warn_trim(&committed);
                 eprintln!(
                     "bakon: tracked {} (baseline version {})",
                     path,
@@ -102,6 +103,7 @@ pub fn edit(cli: &Cli, file: &Path, no_hook: bool) -> Result<u8> {
         }
         let prepared = store.prepare_commit(id, &edited, Source::Edit)?;
         let committed = store.commit(prepared, Some(head))?;
+        warn_trim(&committed);
         let manifest = store.manifest(id)?;
         (committed, manifest)
     };
@@ -157,6 +159,7 @@ pub fn revert(cli: &Cli, file: &Path, version: u32, force: bool, no_hook: bool) 
             let content = current.expect("diverged implies content");
             let salvage = store.prepare_commit(id, &content, Source::Salvage)?;
             let salvaged = store.commit(salvage, Some(head.ver))?;
+            warn_trim(&salvaged);
             previous = salvaged.version();
         }
 
@@ -183,6 +186,7 @@ pub fn revert(cli: &Cli, file: &Path, version: u32, force: bool, no_hook: bool) 
                 .ver;
             store.begin_apply(id, pending_version, old_blob, new_blob)?;
             let committed = store.commit(prepared, Some(head.ver))?;
+            warn_trim(&committed);
             apply::write_target(&path, &target_content)
                 .map_err(|error| applied(error, committed.version()))?;
             store.finish_apply(id)?;
@@ -816,6 +820,15 @@ fn read_if_exists(path: &AbsPath) -> Result<Option<Vec<u8>>> {
             }
         }
         Err(error) => Err(Error::Io(error)),
+    }
+}
+
+fn warn_trim(committed: &Committed) {
+    if committed.trim_failed() {
+        eprintln!(
+            "bakon: saved version {}, but old objects could not be reclaimed; run `bakon verify --fix`",
+            committed.version()
+        );
     }
 }
 

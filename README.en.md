@@ -164,6 +164,7 @@ Hook failure does not roll back a saved version and exits with code 5. `--no-hoo
 - Entry point: [`design/MODULE__bakon-v1-design.md`](design/MODULE__bakon-v1-design.md)
 - State machine, data formats, write protocol, and CLI contract: [`design/`](design/)
 - Formal re-audit of the v1 design and implementation: [`docs/design-audit-v1-2026-11-10.md`](docs/design-audit-v1-2026-11-10.md)
+- Recheck after the fixes: [`docs/design-audit-v1-2026-11-10-recheck.md`](docs/design-audit-v1-2026-11-10-recheck.md)
 - The 0.x formal audit (historical evidence): [`docs/design-audit-2026-11-10.md`](docs/design-audit-2026-11-10.md)
 
 ## License

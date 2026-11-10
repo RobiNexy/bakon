@@ -8,7 +8,7 @@
 - v1 形式论证与详细设计已完成；M0–M2 已落地在 `crates/`：对象层、清单层、`init`/`edit`/`log`/`ls`/`path`/`show`/`diff`/`revert`/`prune`/`mv`/`hook`/`config`/`verify`/`store`、写回与崩溃恢复。13 项审计缺陷的回归用例在 `crates/bakon/tests/regressions.rs`。
 - M3 已完成崩溃注入、并发用例、性能实测、7 个目标的 `cargo check`，以及 Windows/macOS runner 冒烟（build、`init`、`verify`；Windows 另含 `edit`/`log`/`revert`）。Windows 钩子与并发用例、7 个目标的可链接产物与发布路径未验证。设计入口：[[MODULE__bakon-v1-design]]。
 - 0.x 的 `docs/design.md` 与 `docs/new_design.md` 已删除；`docs/` 保留两份审计报告（[[design-audit-2026-11-10]] 与 [[design-audit-v1-2026-11-10]]）。`README.md`、`README.en.md` 与项目文档只描述 v1。
-- 第二次形式化审计的 P1 已修复：裁剪与 `prune` 的孤儿对象会回收，`init` 能清理崩溃留下的标记临时文件，`verify` 会报告 pending 与 `.pending`，恢复会先 `salvage` 崩溃后的外部编辑；`ls`/`path`/`store` 已补齐。剩余 P2/P3 见任务板。
+- 第二次形式化审计的 P1 已修复：裁剪与 `prune` 的孤儿对象会回收，`init` 能清理崩溃留下的标记临时文件，`verify` 会报告 pending 与 `.pending`，恢复会先 `salvage` 崩溃后的外部编辑；`ls`/`path`/`store` 已补齐。复核见 [[design-audit-v1-2026-11-10-recheck]]，剩余 P2/P3 见任务板。
 
 ## Known limitations
 

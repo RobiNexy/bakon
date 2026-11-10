@@ -4,7 +4,7 @@
 
 <!-- One line per task. Link an existing design file when one applies; mark blockers with Q-<topic>. Remove the reference when the question is resolved. Empty is fine. -->
 
-> 审计来源：[[design-audit-2026-11-10]]、[[design-audit-v1-2026-11-10]]；v1 设计入口：[[MODULE__bakon-v1-design]]。
+> 审计来源：[[design-audit-2026-11-10]]、[[design-audit-v1-2026-11-10]]、[[design-audit-v1-2026-11-10-recheck]]；v1 设计入口：[[MODULE__bakon-v1-design]]。
 
 - P1 v1 M3 剩余：Windows 钩子与并发用例、7 个目标的可链接产物（[[MODULE__bakon-v1-design]] §10）
 - P1 v1 发布路径：用 cargo 产物建立 Release 工作流，并演练一次回滚（[[AGENT__procedure__change-path]]）
