@@ -1,0 +1,6 @@
+# 固定工具链，保证本机与 CI 使用同一个编译器。
+# 升级是有意的改动：改这里 -> 提交 -> 让 CI 重新验证。
+[toolchain]
+channel = "1.99.1"
+components = ["clippy", "rustfmt"]
+profile = "minimal"

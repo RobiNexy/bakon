@@ -20,6 +20,17 @@ jobs:
       - name: go test
         run: go test -race -count=1 ./...
 
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: rustfmt check
+        run: cargo fmt --all --check
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: cargo test
+        run: cargo test --workspace --all-targets
+
   cross-build:
     runs-on: ubuntu-latest
     steps:

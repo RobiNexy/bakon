@@ -10,6 +10,9 @@
 - Type check: `go vet ./...` (detected from CI)
 - Lint / format: `test -z "$(gofmt -l .)"` (detected from CI; fix with `gofmt -w .`)
 - Build: `go build .` for a local binary; `scripts/build.sh` for release artifacts in `dist/` (detected)
+- Rust build: `cargo build --workspace`; binary at `target/debug/bakon` (detected; toolchain pinned by `rust-toolchain.toml`)
+- Rust tests: `cargo test --workspace --all-targets` (detected)
+- Rust lint / format: `cargo clippy --workspace --all-targets -- -D warnings` and `cargo fmt --all --check` (detected)
 
 ## Environments
 
