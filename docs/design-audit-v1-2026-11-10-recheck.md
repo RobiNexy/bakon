@@ -109,7 +109,7 @@ V1-7、V1-11、V1-13 没有运行时反例，结论来自签名与代码路径�
 - `cargo test --workspace --all-targets`：117 个测试通过（core 55、regressions 13、cli 集成 35、cli 单元 7、crash 6、concurrency 1）。
 - `cargo clippy --workspace --all-targets -- -D warnings`：通过。
 - `cargo fmt --all --check`：通过。
-- R1 至 R13 的反例均以真实二进制与隔离存储复现。
+- R1 至 R5 与 R7 至 R13 的反例均以真实二进制与隔离存储复现。
 
 ### 7.2 未覆盖
 
