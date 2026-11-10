@@ -2,6 +2,8 @@
 
 > Effortlessly keep version history while editing critical files.
 
+> **Status: v1 rewrite in progress.** `main` still carries 0.x (Go + Git); the `v1-rust` branch is a Rust rewrite with its own content-addressed store and has completed M0–M2. The installation and command text below describes 0.x; see “v1 (in progress)” for building v1 and [`design/`](design/) for the design.
+
 [English](README.en.md) | [中文](README.md)
 
 [![CI](https://github.com/RobiNexy/Bakon/actions/workflows/ci.yml/badge.svg)](https://github.com/RobiNexy/Bakon/actions/workflows/ci.yml)
@@ -12,6 +14,18 @@ Bakon is a single-machine command-line file version manager. It lets your usual 
 - Per-file append-only integer versions; rollback creates a new version
 - The target file is edited in place; Bakon stores copies only in its repository
 - Per-file retention, hooks, atomic writes, and serialized write operations
+
+## v1 (in progress)
+
+The Rust workspace lives in `crates/`, does not call git, and defaults to `~/.bakon/store`:
+
+```sh
+cargo build --release -p bakon
+cargo test --workspace
+target/release/bakon edit /etc/nginx/nginx.conf
+```
+
+Design entry: [`design/MODULE__bakon-v1-design.md`](design/MODULE__bakon-v1-design.md). Release artifacts and Windows semantics are still open; see the task board.
 
 ## Installation
 

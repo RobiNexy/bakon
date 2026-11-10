@@ -1,5 +1,6 @@
 # Bakon — 单机文件版本管理工具 · 设计文档
 
+> **历史文档。** 本文描述 0.x（Go + Git）。v1 的设计见 [`design/`](design/)，入口为 [`design/MODULE__bakon-v1-design.md`](design/MODULE__bakon-v1-design.md)。
 
 ## 1. 定位
 

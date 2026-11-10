@@ -16,7 +16,8 @@ use crate::types::{AbsPath, BlobHash};
 use crate::{Error, Result};
 
 /// 压缩级别固定，保证同一输入产生同一字节串（去重依赖这一点）。
-const COMPRESSION: Compression = Compression::new(6);
+/// 取最快级别：1 MB 提交的预算由 fsync 与哈希决定，压缩不应成为瓶颈。
+const COMPRESSION: Compression = Compression::fast();
 
 /// 对象库的根：`<store>/objects/`。
 #[derive(Debug)]

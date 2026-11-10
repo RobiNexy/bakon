@@ -2,6 +2,8 @@
 
 > 编辑关键文件时，无感地保留版本历史。
 
+> **状态：v1 重写进行中。** `main` 上的 0.x 使用 Go + Git；`v1-rust` 分支用 Rust 重写并自建内容寻址存储，已完成 M0–M2。下文安装与命令说明仍描述 0.x；v1 的构建方式见「v1（开发中）」，设计见 [`design/`](design/)。
+
 [English](README.en.md) | 中文
 
 [![CI](https://github.com/RobiNexy/Bakon/actions/workflows/ci.yml/badge.svg)](https://github.com/RobiNexy/Bakon/actions/workflows/ci.yml)
@@ -12,6 +14,18 @@ Bakon 是一个单机命令行文件版本管理工具。它使用熟悉的编�
 - 文件历史使用递增整数版本号，回退只追加新版本，不覆盖旧历史
 - 编辑器原地操作目标文件，Bakon 只在仓库中保存副本
 - 支持每文件保留上限、变更钩子、原子写入和并发锁
+
+## v1（开发中）
+
+Rust 工作区位于 `crates/`，不依赖 git，存储默认 `~/.bakon/store`：
+
+```sh
+cargo build --release -p bakon
+cargo test --workspace
+target/release/bakon edit /etc/nginx/nginx.conf
+```
+
+设计入口：[`design/MODULE__bakon-v1-design.md`](design/MODULE__bakon-v1-design.md)。发布产物与 Windows 语义尚未完成，见任务板。
 
 ## 安装
 

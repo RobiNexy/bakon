@@ -525,6 +525,10 @@ impl Store {
 
     fn remember(&mut self, manifest: &Manifest) {
         let key = manifest.path.as_path().to_string_lossy().into_owned();
+        let entry = self.index_cache().entries.get(&key).copied();
+        if entry == Some(manifest.id) {
+            return;
+        }
         self.index_cache().entries.insert(key, manifest.id);
         self.save_index();
     }
@@ -659,12 +663,11 @@ impl Store {
         }
     }
 
-    /// `.lock` 的内容只用于错误提示，锁语义由 flock 决定。
+    /// `.lock` 的内容只用于错误提示，锁语义由 flock 决定；不 fsync。
     fn write_holder(&self, file: &File) {
         let mut handle = file;
         let _ = handle.set_len(0);
         let _ = writeln!(handle, "{}", std::process::id());
-        let _ = handle.sync_all();
     }
 
     fn read_holder(&self) -> Option<u32> {

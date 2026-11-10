@@ -54,9 +54,8 @@ pub(crate) fn write_atomic(path: &AbsPath, tmp_dir: &AbsPath, bytes: &[u8]) -> R
     if let Some(parent) = path.as_path().parent() {
         fsync_dir(parent)?;
     }
-    if tmp_dir.as_path() != path.as_path().parent().unwrap_or(Path::new("")) {
-        fsync_dir(tmp_dir.as_path())?;
-    }
+    // 不 fsync 临时目录：崩溃残留的 tmp 文件没有引用，启动时会被清空；
+    // 目标目录的 fsync 才决定 rename 结果是否可见。
     Ok(())
 }
 
