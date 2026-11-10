@@ -465,13 +465,14 @@ impl Store {
                     candidates.push(record.blob);
                 }
             }
-            for hash in candidates {
-                self.move_to_trash(hash)?;
-            }
-
             let mut trimmed = manifest;
             trimmed.versions.drain(..remove_count);
             self.save_manifest(&trimmed)?;
+
+            // 清单先行：提交后这些对象才不可达，崩溃残留最多是垃圾。
+            for hash in candidates {
+                self.move_to_trash(hash)?;
+            }
         }
 
         if !dry_run {

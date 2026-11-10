@@ -74,6 +74,22 @@ impl Case {
             .unwrap()
     }
 
+    fn crash_prune(&self, config: &Path, limit: u64) -> Output {
+        self.command(&[
+            "--config",
+            config.to_str().unwrap(),
+            "prune",
+            self.file.to_str().unwrap(),
+        ])
+        .env("BAKON_TEST_CRASH_AFTER", limit.to_string())
+        .output()
+        .unwrap()
+    }
+
+    fn show(&self, version: &str) -> Output {
+        self.run(&["show", self.file.to_str().unwrap(), version])
+    }
+
     fn track(&self) {
         let output = self.edit(&self.noop);
         assert_eq!(output.status.code(), Some(0), "track failed");
@@ -171,5 +187,45 @@ fn revert_survives_a_crash_at_every_durability_point() {
     assert!(
         observed >= 8,
         "expected many durability points, saw {observed}"
+    );
+}
+
+#[test]
+fn prune_survives_a_crash_at_every_durability_point() {
+    let mut observed = 0;
+    for limit in 1..=20 {
+        let case = Case::new(b"v0");
+        let limited = case.temporary.path().join("limited.toml");
+        fs::write(&limited, "[retention]\nmax_versions = 2\n").unwrap();
+
+        case.track();
+        let v1 = case.editor("printf 'v1' > \"$1\"");
+        assert_eq!(case.edit(&v1).status.code(), Some(0));
+        let v2 = case.editor("printf 'v2' > \"$1\"");
+        assert_eq!(case.edit(&v2).status.code(), Some(0));
+
+        let crashed = case.crash_prune(&limited, limit);
+        if crashed.status.code() != Some(CRASH_EXIT) {
+            break;
+        }
+        observed += 1;
+
+        case.recover();
+
+        let log = case.log();
+        assert!(!log.is_empty(), "at least one version must remain");
+        for line in log.lines() {
+            let version = line.split('\t').next().unwrap();
+            let shown = case.show(version);
+            assert_eq!(
+                shown.status.code(),
+                Some(0),
+                "version {version} lost after prune crash at {limit}"
+            );
+        }
+    }
+    assert!(
+        observed >= 3,
+        "expected several durability points, saw {observed}"
     );
 }
