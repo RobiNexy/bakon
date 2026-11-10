@@ -728,8 +728,9 @@ fn run_shell_with_env(
 ) -> Result<std::process::ExitStatus> {
     #[cfg(windows)]
     let mut command = {
+        use std::os::windows::process::CommandExt;
         let mut command = ProcessCommand::new("cmd");
-        command.arg("/C").arg(hook);
+        command.arg("/C").raw_arg(hook);
         command
     };
     #[cfg(not(windows))]
@@ -772,7 +773,13 @@ fn run_editor(path: &AbsPath, editor: &str) -> Result<()> {
 /// Unix 用 `sh -c`，Windows 用 `cmd /C`；钩子与编辑器共用。
 fn run_shell(command: &str) -> Result<std::process::ExitStatus> {
     #[cfg(windows)]
-    let status = ProcessCommand::new("cmd").arg("/C").arg(command).status();
+    let status = {
+        use std::os::windows::process::CommandExt;
+        ProcessCommand::new("cmd")
+            .arg("/C")
+            .raw_arg(command)
+            .status()
+    };
     #[cfg(not(windows))]
     let status = ProcessCommand::new("sh").arg("-c").arg(command).status();
     status.map_err(Error::Io)
