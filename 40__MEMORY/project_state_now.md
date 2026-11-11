@@ -6,7 +6,7 @@
 
 - v1（Rust）是当前实现，已位于 `main`；0.x 的 Go 实现、`go.mod`、`internal/`、Go 发布脚本与 Go CI 已从代码树删除，只保留在历史提交与旧标签中。依据：[[ADR__replace-git-with-own-content-addressed-store]]、[[ADR__rewrite-in-rust]]。
 - v1 形式论证与详细设计已完成；M0–M2 已落地在 `crates/`：对象层、清单层、`init`/`edit`/`log`/`ls`/`path`/`show`/`diff`/`revert`/`prune`/`mv`/`hook`/`config`/`verify`/`store`、写回与崩溃恢复。13 项审计缺陷的回归用例在 `crates/bakon/tests/regressions.rs`。
-- M3 已完成崩溃注入、并发用例、性能实测、7 个目标的 `cargo check`，以及 Windows/macOS runner 冒烟（build、`init`、`verify`；Windows 另含 `edit`/`log`/`revert`）。cargo Release 工作流已在 `v1.0.0` 与 `v1.0.1` 上成功运行，7 个归档与 `checksums.txt` 已校验；Windows 钩子与并发用例未验证。设计入口：[[MODULE__bakon-v1-design]]。
+- M3 已完成崩溃注入、并发用例、性能实测、7 个目标的 `cargo check`，以及 Windows/macOS runner 冒烟（build、`init`、`verify`；Windows 另含 `edit`/`log`/`revert`）。cargo Release 工作流已在 `v1.0.0`、`v1.0.1` 与 `v1.0.2` 上成功运行，7 个归档与 `checksums.txt` 已校验；Windows 钩子与并发用例未验证。设计入口：[[MODULE__bakon-v1-design]]。
 - 0.x 的 `docs/design.md` 与 `docs/new_design.md` 已删除；`docs/` 保留审计报告（[[design-audit-2026-11-10]]、[[design-audit-v1-2026-11-10]]、[[design-audit-v1-2026-11-10-recheck]] 与 [[design-audit-v1-2026-11-11]]）。`README.md`、`README.en.md` 与项目文档只描述 v1。
 - 第二次形式化审计的 P1 已修复：裁剪与 `prune` 的孤儿对象会回收，`init` 能清理崩溃留下的标记临时文件，`verify` 会报告 pending 与 `.pending`，恢复会先 `salvage` 崩溃后的外部编辑；`ls`/`path`/`store` 已补齐。复核见 [[design-audit-v1-2026-11-10-recheck]]，剩余 P2/P3 见任务板。
 - 第三次全量审计（[[design-audit-v1-2026-11-11]]）覆盖 21 个 Rust 文件，审计时 120 个测试；结论为 2 项 P1（`init` 删除 `BAKON_STORE.*.tmp` 形状的用户文件、恢复对不可判定 pending 假成功并删除 `.pending`）、11 项 P2、7 项主 P3 与 13 项次要观察。正常 CLI 主路径未发现新的数据损坏反例；外部评审 10 项中 7 项成立、2 项部分成立、1 项仅为可读性。两项 P1 已在下一条中修复。
@@ -24,8 +24,8 @@
 - 7 个交叉编译目标的工具链尚未验证；本机只有宿主默认目标 `x86_64-unknown-linux-gnu`（Rust stable 1.99.1 已装，`~/.cargo/bin` 在 PATH）。
 - 旧存储迁移不在 v1.0 范围；旧 `repo/` 不被读取也不被删除。
 - `edit` 通过 `sh -c` 启动编辑器，Windows 语义属 M3。
-- 复审剩余：Windows/macOS 大小写路径键未在 runner 验证；实际裁剪仍需全局引用扫描；Windows 全量测试未跑通（测试夹具依赖 `sh` 与 `/tmp` 断言）；初始化标记临时文件只忽略不删除，但 `verify --fix` 会清理严格命名的原子写临时文件；O-10 的 Windows shell 引号未验证。
-- 人工验收流程见 [[OPS__manual-testing]]；`README.md`/`README.en.md` 只保留介绍与使用说明。仓库与本地目录已改为小写 `bakon`，`v1.0.1` 已打 tag 并完成 Release；`edit --editor` 与详细使用说明已包含在发布中。
+- 复审剩余：Windows/macOS 大小写路径键未在 runner 验证；Windows 全量测试未跑通（测试夹具依赖 `sh` 与 `/tmp` 断言）；初始化标记临时文件只忽略不删除，但 `verify --fix` 会清理严格命名的原子写临时文件；O-10 的 Windows shell 引号未验证。实际裁剪的全局引用扫描是 v1 的有意取舍，见 [[DATA__blob-store-and-durability]]。
+- 人工验收流程见 [[OPS__manual-testing]]；`README.md`/`README.en.md` 只保留介绍与使用说明。仓库与本地目录已改为小写 `bakon`，`v1.0.2` 已打 tag 并完成 Release，包含全量审计修复与 `edit --editor` 使用说明。
 - 端到端 1 MB 文本提交实测约 50 ms（本机 ext4/NVMe），验收预算已调整为 60 ms；成本主要是进程启动、编辑器与 fsync。
 
 ## Important deviations
