@@ -1,411 +1,358 @@
 # OPS__manual-testing
 
-面向一次完整人工验收的手工流程。默认在 Linux 本地执行；Windows 与 macOS 的差异单独列出。所有操作都在临时目录中完成，不触碰真实的系统配置文件。
+这是一次“以用户身份使用 bakon”的完整走查：从安装开始，管理一个演示配置文件，经历日常编辑、查看、回退、钩子、裁剪、改名、校验、备份和清理。按顺序执行即可；每一步都给出了应当看到的结果。
 
-## 0. 准备
+演示在独立目录中进行，不会碰真实的系统配置。
 
-```sh
-export REPO=/path/to/bakon
-export BAKON="$REPO/target/debug/bakon"       # 崩溃注入需要 debug 构建
-export RELEASE="$REPO/target/release/bakon"   # 发布验收使用
-export T=$(mktemp -d /tmp/bakon-manual.XXXXXX)
-cd "$T"
-```
+## 1. 准备
+
+先安装或构建 bakon，并让 `bakon` 在 `PATH` 中：
 
 ```sh
-cargo build --workspace
 cargo build --release -p bakon
-"$BAKON" version
-"$RELEASE" version
+export PATH="$PWD/target/release:$PATH"
 ```
 
-预期：两条 `version` 都输出版本与 `x86_64-unknown-linux-gnu` 一类的目标三元组。
-
-## 1. 入口与帮助
+创建演示环境：
 
 ```sh
-"$BAKON" --help
-"$BAKON" help edit
+export DEMO="$HOME/bakon-demo"
+export BAKON_HOME="$DEMO/state"
+mkdir -p "$BAKON_HOME" "$DEMO/files"
+cd "$DEMO/files"
 ```
 
-预期：列出 16 个命令：`init`、`version`、`edit`、`revert`、`log`、`ls`、`path`、`store`、`show`、`dump`、`diff`、`prune`、`mv`、`hook`、`config`、`verify`。
+`BAKON_HOME` 让配置和存储在演示目录中，不污染你日常使用的 `~/.bakon`。
 
-## 2. 初始化与归属
+确认版本和命令：
 
 ```sh
-"$BAKON" --store ./store init
-"$BAKON" --store ./store init
-mkdir foreign && printf x > foreign/notes.txt
-"$BAKON" --store ./foreign init; echo "exit=$?"
+bakon version
+bakon --help
 ```
 
-预期：
+应当看到版本号、目标平台，以及 `init`、`edit`、`log`、`diff`、`revert`、`prune`、`hook`、`verify` 等命令。
 
-- 第一次输出 `initialized`，第二次输出 `already initialized`，均退出 0。
-- 对非空且无标记的目录退出 6，并提示不是 bakon 存储。
-- `store/` 下存在 `BAKON_STORE`、`files/`、`objects/`、`trash/`。
+## 2. 第一次使用
 
-## 3. 纳管与历史
+初始化存储：
 
 ```sh
-printf 'one\n' > note.txt
-printf '#!/bin/sh\nprintf "two\\n" > "$1"\n' > editor.sh
-chmod +x editor.sh
-
-EDITOR="$T/editor.sh" "$BAKON" --store ./store edit ./note.txt
-"$BAKON" --store ./store log ./note.txt
+bakon init
 ```
 
-预期：首次 `edit` 输出 `tracked ... baseline version 0`，随后保存版本 1；`log` 显示版本 1、0，来源分别为 `edit`、`baseline`。
+看到 `initialized .../bakon-demo/state/store`。再执行一次：
 
 ```sh
-printf '#!/bin/sh\nexit 0\n' > noop.sh
-chmod +x noop.sh
-EDITOR="$T/noop.sh" "$BAKON" --store ./store edit ./note.txt
+bakon init
 ```
 
-预期：输出 `no changes`，版本数不变。
+看到 `already initialized`，不会重复创建。
 
-## 4. 查看与比较
+创建一个演示配置：
 
 ```sh
-"$BAKON" --store ./store show ./note.txt 0
-"$BAKON" --store ./store dump ./note.txt 0 > exported.txt
-"$BAKON" --store ./store diff ./note.txt
-echo "diff_exit=$?"
-"$BAKON" --store ./store diff ./note.txt 0 1
-echo "diff_exit=$?"
-"$BAKON" --store ./store diff ./note.txt 0 99
-echo "missing_exit=$?"
+cat > nginx.conf <<'EOF'
+server {
+    listen 80;
+    server_name example.test;
+    root /var/www/html;
+}
+EOF
 ```
 
-预期：
-
-- `show` 输出原始字节；`dump` 结果与版本 0 内容一致。
-- 版本 0 与 1 有差异时退出 1。
-- 不存在的版本退出 3，而不是 1。
-
-二进制差异：
+第一次编辑并纳管：
 
 ```sh
-printf '\000\001\002' > blob.bin
-printf '#!/bin/sh\nprintf "\\000\\003" > "$1"\n' > bin-editor.sh
-chmod +x bin-editor.sh
-EDITOR="$T/bin-editor.sh" "$BAKON" --store ./store edit ./blob.bin
-"$BAKON" --store ./store diff ./blob.bin 0 1
-echo "binary_diff_exit=$?"
+export EDITOR=vi
+bakon edit ./nginx.conf
 ```
 
-预期：stderr 提示二进制文件不同，退出 1。
+编辑器打开后，把 `listen 80;` 改成 `listen 8080;`，保存退出。
 
-## 5. 回退与分歧
+应当看到：
 
-```sh
-"$BAKON" --store ./store revert ./note.txt 0
-cat note.txt
+```text
+bakon: tracked .../nginx-demo/files/nginx.conf (baseline version 0)
+bakon: saved version 1 of .../nginx.conf
 ```
 
-预期：文件内容回到版本 0，`log` 新增一条 `revert` 版本；历史不删除。
+查看历史：
 
 ```sh
-printf 'outside\n' > note.txt
-"$BAKON" --store ./store revert ./note.txt 0; echo "refuse_exit=$?"
-"$BAKON" --store ./store revert ./note.txt 0 --force; echo "force_exit=$?"
-"$BAKON" --store ./store --format plain log ./note.txt
+bakon log ./nginx.conf
 ```
 
-预期：
+应当有两行：
 
-- 未加 `--force` 时退出 4，文件保持 `outside`。
-- 加 `--force` 时退出 0；日志出现 `salvage`，随后是新的 `revert`。
-- `show` 能读回 `outside` 的 salvage 版本。
-
-缺失目标文件：
-
-```sh
-rm note.txt
-"$BAKON" --store ./store revert ./note.txt 0
-cat note.txt
+```text
+  ver  time                  size  source
+    1  ...                    ...  edit
+    0  ...                    ...  baseline
 ```
 
-预期：文件被重新创建，内容为版本 0。
+新版本在前，版本号只增不减。
 
-## 6. 符号链接与路径
+## 3. 日常查看与比较
+
+查看版本 0 的原始内容：
 
 ```sh
-mkdir -p real linkdir
-printf 'target\n' > real/file.txt
-ln -s ../real linkdir/link
-printf '#!/bin/sh\nprintf "changed\\n" > "$1"\n' > link-editor.sh
-chmod +x link-editor.sh
-
-EDITOR="$T/link-editor.sh" "$BAKON" --store ./store edit ./linkdir/link
-test -L linkdir/link && echo "link_kept"
-cat real/file.txt
+bakon show ./nginx.conf 0
 ```
 
-预期：链接本身仍是符号链接，真实目标内容变为 `changed`。
+看到的是修改前的 `listen 80;`。导出到文件：
 
 ```sh
-"$BAKON" --store ./store edit ./linkdir/link/../file.txt; echo "dotdot_exit=$?"
+bakon dump ./nginx.conf 0 > nginx.conf.v0
 ```
 
-预期：退出 2；提示 `..` 前经过符号链接；两个文件都未被修改。
-
-## 7. 裁剪与对象回收
+比较最近两个版本：
 
 ```sh
-printf '[retention]\nmax_versions = 2\n' > limited.toml
-printf 'v0\n' > trim.txt
-for n in 1 2 3 4 5; do
-  printf '#!/bin/sh\nprintf "v%s\\n" > "$1"\n' "$n" > trim-editor.sh
-  chmod +x trim-editor.sh
-  EDITOR="$T/trim-editor.sh" "$BAKON" --store ./store --config limited.toml edit ./trim.txt
-done
-
-"$BAKON" --store ./store --config limited.toml --format plain log ./trim.txt
-"$BAKON" --store ./store --config limited.toml verify
-"$BAKON" --store ./store --config limited.toml prune --dry-run
-"$BAKON" --store ./store --config limited.toml store size --format json
+bakon diff ./nginx.conf
 ```
 
-预期：
-
-- `log` 只剩最新 2 个版本。
-- `verify` 返回 0。
-- `prune --dry-run` 不改变版本。
-- `store size` 中的文件数与对象数应与当前版本数一致，不随历史次数无限增长。
-
-> 注意：`trim-editor.sh` 每次写的是 `v$n`，如果内容重复，不会产生新版本；确认 `log` 的版本号连续递增。
-
-## 8. 改名与身份
+应当看到 `-    listen 80;` 和 `+    listen 8080;`。有差异时命令退出码为 1，这是正常的：
 
 ```sh
-"$BAKON" --store ./store mv ./trim.txt ./trim-renamed.txt
-"$BAKON" --store ./store log ./trim-renamed.txt
-"$BAKON" --store ./store log ./trim.txt; echo "old_exit=$?"
-printf 'new\n' > trim.txt
-EDITOR="$T/noop.sh" "$BAKON" --store ./store edit ./trim.txt
-"$BAKON" --store ./store --format json path ./trim.txt
-"$BAKON" --store ./store --format json path ./trim-renamed.txt
+echo $?    # 1
 ```
 
-预期：
-
-- `mv` 只改记录路径，磁盘文件不移动。
-- 旧路径不再有历史，退出 3。
-- 重新纳管旧路径产生新的 id；两个 `path` 输出的 id 不同。
-
-## 9. 命令与格式
+再编辑一次，把 `root /var/www/html;` 改成 `root /srv/www;`：
 
 ```sh
-"$BAKON" --store ./store ls
-"$BAKON" --store ./store path ./trim-renamed.txt
-"$BAKON" --store ./store store path
-"$BAKON" --store ./store store size
-"$BAKON" --store ./store --format json ls
-"$BAKON" --store ./store --format json prune
+bakon edit ./nginx.conf
+bakon log ./nginx.conf
 ```
 
-预期：
+现在应当有版本 0、1、2。
 
-- `ls` 按路径排序。
-- `path` 输出 path、id、manifest。
-- `store path/size` 输出存储位置或字节/文件数。
-- `--format json` 只输出 JSON；空 `prune` 输出 `{"dry_run":false,"files":[]}` 一类对象。
+如果打开编辑器后没有修改就退出，`bakon edit` 会提示 `no changes`，不会产生空版本。
 
-## 10. 钩子
+## 4. 回退
+
+把文件恢复到版本 0：
 
 ```sh
-"$BAKON" --store ./store hook set ./trim-renamed.txt 'printf "%s %s %s\\n" "$BAKON_FILE" "$BAKON_VERSION" "$BAKON_SOURCE" >> hook.log'
-printf '#!/bin/sh\nprintf "hook-change\\n" > "$1"\n' > hook-editor.sh
-chmod +x hook-editor.sh
-EDITOR="$T/hook-editor.sh" "$BAKON" --store ./store edit ./trim-renamed.txt
+bakon revert ./nginx.conf 0
+cat nginx.conf
+```
+
+看到最初的内容。再查看历史：
+
+```sh
+bakon log ./nginx.conf
+```
+
+版本 0 和 1、2 仍在，最新一条是 `revert`。回退不会删除历史。
+
+### 手工改过文件之后
+
+模拟“绕过 bakon 直接改文件”：
+
+```sh
+printf 'server { listen 9090; }\n' > nginx.conf
+bakon revert ./nginx.conf 0
+echo $?    # 4
+```
+
+bakon 拒绝覆盖，因为当前磁盘内容与记录的最新版本不同。
+
+确认要覆盖时：
+
+```sh
+bakon revert ./nginx.conf 0 --force
+bakon log ./nginx.conf
+```
+
+日志里会出现一条 `salvage`，保存你刚才手工写的内容；随后才是新的 `revert`。之前的编辑不会凭空丢失。
+
+## 5. 钩子
+
+让每次保存后执行一条命令。这里用写日志代替真实的 reload：
+
+```sh
+bakon hook set ./nginx.conf 'printf "reloaded %s\n" "$BAKON_VERSION" >> hook.log'
+```
+
+修改一次配置：
+
+```sh
+bakon edit ./nginx.conf
 cat hook.log
-"$BAKON" --store ./store hook show ./trim-renamed.txt
 ```
 
-预期：钩子文件包含目标绝对路径、新版本号与 `edit`；钩子执行成功时命令退出 0。
+应当看到新版本号。钩子在版本保存成功后执行。
+
+钩子失败不会回滚版本：
 
 ```sh
-"$BAKON" --store ./store hook set ./trim-renamed.txt 'exit 9'
-EDITOR="$T/hook-editor.sh" "$BAKON" --store ./store edit ./trim-renamed.txt
-echo "hook_fail_exit=$?"
-"$BAKON" --store ./store hook unset ./trim-renamed.txt
+bakon hook set ./nginx.conf 'exit 9'
+bakon edit ./nginx.conf
+echo $?    # 5
 ```
 
-预期：退出 5；版本仍然保存；`--no-hook` 可跳过。
+版本仍然保存；如果不想执行钩子，可以加 `--no-hook`。
 
-递归：
+最后清除钩子：
 
 ```sh
-"$BAKON" --store ./store hook set ./trim-renamed.txt "$BAKON --store ./store log ./trim-renamed.txt"
-EDITOR="$T/hook-editor.sh" "$BAKON" --store ./store edit ./trim-renamed.txt
-echo "recursive_exit=$?"
+bakon hook unset ./nginx.conf
 ```
 
-预期：钩子不递归；子进程看到 `BAKON_HOOK=1` 后跳过钩子；命令正常结束。
+## 6. 保留数量与裁剪
 
-## 11. 配置
-
-```sh
-"$BAKON" --config ./config.toml config init
-cat config.toml
-"$BAKON" --config ./config.toml config show
-"$BAKON" --config ./config.toml --format json config show
-printf 'broken = [\n' > bad.toml
-"$BAKON" --config ./bad.toml config show; echo "bad_config_exit=$?"
-```
-
-预期：`config init` 生成模板；`config show` 显示生效的 config、store、editor、max_versions；坏配置退出 2。
-
-## 12. 校验、损坏与恢复
+默认保留 100 个版本。为了演示裁剪，先多改几次：
 
 ```sh
-"$BAKON" --store ./store verify
-"$BAKON" --store ./store verify --size
-rm store/index.json
-"$BAKON" --store ./store log ./trim-renamed.txt
-"$BAKON" --store ./store verify --fix
-test -f store/index.json && echo "index_rebuilt"
-```
-
-预期：`log` 在没有索引时仍能工作；`verify --fix` 重建索引；随后 `verify` 返回 0。
-
-对象损坏：
-
-```sh
-obj=$(find store/objects -type f | head -1)
-cp "$obj" "$obj.bak"
-printf 'broken' > "$obj"
-"$BAKON" --store ./store verify; echo "corrupt_exit=$?"
-cp "$obj.bak" "$obj"
-"$BAKON" --store ./store verify
-```
-
-预期：损坏时退出 6，指出文件/版本；恢复对象后再次一致。
-
-崩溃恢复（仅 debug）：
-
-```sh
-printf 'one\n' > crash.txt
-printf '#!/bin/sh\nprintf "two\\n" > "$1"\n' > two.sh
-chmod +x two.sh
-EDITOR="$T/two.sh" "$BAKON" --store ./store edit ./crash.txt
-
-# 找到一个会留下 pending 的崩溃点
-for n in $(seq 1 15); do
-  BAKON_TEST_CRASH_AFTER=$n "$BAKON" --store ./store revert ./crash.txt 0 >/dev/null 2>&1
-  code=$?
-  if [ "$code" = 137 ] && [ -f store/.pending ] && grep -q '"pending_apply": true' store/files/*.json; then
-    echo "pending_at=$n"; break
-  fi
+for n in 1 2 3 4; do
+  printf 'server { listen %s; }\n' "$((8080 + n))" > nginx.conf
+  bakon edit ./nginx.conf
 done
-
-"$BAKON" --store ./store verify; echo "pending_verify_exit=$?"
-printf 'external-edit\n' > crash.txt
-"$BAKON" --store ./store verify --fix; echo "fix_exit=$?"
-cat crash.txt
-"$BAKON" --store ./store --format plain log ./crash.txt
+bakon log ./nginx.conf
 ```
 
-预期：
-
-- 找到 pending 后，普通 `verify` 退出 6 并报告 pending。
-- `verify --fix` 退出 0，目标写回为 pending 内容。
-- 日志出现 `salvage`（`external-edit`）和新的 `revert`；外部编辑没有丢失。
-
-## 13. 并发
-
-准备两个编辑器，分别等待同一个栅栏文件：
+现在版本比较多。写入配置：
 
 ```sh
-printf '#!/bin/sh\nwhile [ ! -f "$SYNC" ]; do sleep 0.01; done\nprintf "A\\n" > "$1"\n' > editor-a.sh
-printf '#!/bin/sh\nwhile [ ! -f "$SYNC" ]; do sleep 0.01; done\nprintf "B\\n" > "$1"\n' > editor-b.sh
-chmod +x editor-a.sh editor-b.sh
-printf 'base\n' > race.txt
-EDITOR="$T/noop.sh" "$BAKON" --store ./store edit ./race.txt
-export SYNC="$T/go"
-( EDITOR="$T/editor-a.sh" "$BAKON" --store ./store edit ./race.txt; echo "a=$?" ) &
-( EDITOR="$T/editor-b.sh" "$BAKON" --store ./store edit ./race.txt; echo "b=$?" ) &
-sleep 0.2
-touch "$SYNC"
-wait
-"$BAKON" --store ./store --format plain log ./race.txt
+bakon config init
+sed -i.bak 's/max_versions = 100/max_versions = 3/' "$BAKON_HOME/config.toml"
+bakon config show
 ```
 
-预期：一个进程成功退出 0，另一个因 head 变化退出 4；历史中只多一个成功提交，磁盘上的编辑结果保留。
-
-## 14. 锁与退出码
+确认 `max_versions` 为 3。先看裁剪会做什么：
 
 ```sh
-"$BAKON" --store ./nope log ./missing.txt; echo "missing_store_file_exit=$?"
-"$BAKON" --store ./store show ./missing.txt 0; echo "unmanaged_exit=$?"
-"$BAKON" --store ./store --format json version
-"$BAKON" --store ./store verify --format json
+bakon prune --dry-run
 ```
 
-预期：未纳管/缺失退出 3；`version` 与 `verify` 的 JSON 可解析。
-
-## 15. 备份与恢复
+再实际裁剪：
 
 ```sh
-cp -a store store.backup
-"$BAKON" --store ./store.backup verify
-printf 'after-copy\n' > trim-renamed.txt
-EDITOR="$T/noop.sh" "$BAKON" --store ./store.backup edit ./trim-renamed.txt
-"$BAKON" --store ./store.backup log ./trim-renamed.txt
+bakon prune
+bakon log ./nginx.conf
 ```
 
-预期：副本独立可用，`verify` 一致；对副本的编辑不影响原存储。
+只保留最新 3 个版本。被裁剪的版本不能恢复；版本号不会回收。
 
-## 16. Release 产物
-
-从 GitHub Actions 的 Release 运行中下载压缩包，解压后：
+查看存储占用：
 
 ```sh
-tar -xzf bakon_v1.0.0_linux-amd64.tar.gz
-./bakon_v1.0.0_linux-amd64/bakon version
-mkdir release-test && cd release-test
-../bakon_v1.0.0_linux-amd64/bakon --store ./store init
-printf 'release\n' > note.txt
-../bakon_v1.0.0_linux-amd64/bakon --store ./store edit ./note.txt
-../bakon_v1.0.0_linux-amd64/bakon --store ./store verify
+bakon store size
 ```
 
-预期：产物可执行，版本正确，`init`/`edit`/`verify` 正常。Windows 使用 `.zip` 中的 `bakon.exe`。
+## 7. 改名
 
-## 17. 平台补充
+把记录中的路径改掉：
 
-- **Windows**：确认 `bakon --store C:\bakon-test init`、`edit`、`revert` 可用；检查 `cmd /C` 下编辑器路径含空格；确认 `C:\Foo` 与 `c:\foo` 只产生一个清单。
-- **macOS**：重复第 6 节符号链接用例；确认 `/tmp` 等系统符号链接路径不会误伤普通 `..` 输入。
-- **Termux**：使用 linux arm64 产物，确认 `edit` 的编辑器与钩子可执行。
+```sh
+bakon mv ./nginx.conf ./nginx-main.conf
+bakon log ./nginx-main.conf
+```
 
-## 18. 清理
+`mv` 只改记录，不移动磁盘文件。要让磁盘文件也叫新名字，自己再执行：
+
+```sh
+mv nginx.conf nginx-main.conf
+```
+
+旧路径不再被管理：
+
+```sh
+bakon log ./nginx.conf
+echo $?    # 3
+```
+
+如果重新创建并纳管旧路径：
+
+```sh
+printf 'server { listen 80; }\n' > nginx.conf
+bakon edit ./nginx.conf
+bakon path ./nginx.conf
+bakon path ./nginx-main.conf
+```
+
+两个 `path` 输出的 id 不同，历史互不串线。
+
+## 8. 列出与定位文件
+
+```sh
+bakon ls
+bakon path ./nginx-main.conf
+bakon store path
+bakon store size
+```
+
+`ls` 列出所有被管理路径；`path` 显示路径、id 和清单位置；`store` 显示存储位置或占用。
+
+如果要脚本处理：
+
+```sh
+bakon --format json ls
+bakon --format json path ./nginx-main.conf
+bakon --format json store size
+```
+
+## 9. 一致性检查
+
+```sh
+bakon verify
+```
+
+应当显示 `store is consistent`。
+
+模拟索引丢失：
+
+```sh
+rm "$BAKON_HOME/store/index.json"
+bakon log ./nginx-main.conf
+```
+
+`log` 仍然可用，因为索引只是缓存。重建索引：
+
+```sh
+bakon verify --fix
+bakon verify
+```
+
+现在恢复一致。
+
+如果 `verify` 报告对象缺失或清单损坏，先备份整个 `$BAKON_HOME/store`，再按提示处理；不要直接删除存储目录。
+
+## 10. 备份与恢复
+
+复制整个存储目录就是备份：
+
+```sh
+cp -a "$BAKON_HOME/store" "$BAKON_HOME/store.backup"
+bakon --store "$BAKON_HOME/store.backup" verify
+```
+
+恢复时，把备份目录复制回原位置，或直接用 `--store` 指向备份：
+
+```sh
+bakon --store "$BAKON_HOME/store.backup" log ./nginx-main.conf
+```
+
+备份目录可以独立使用，不影响原存储。
+
+## 11. 出错时怎么看
+
+- 文件没纳管或版本不存在：退出 3。
+- 文件被外部修改，回退被拒绝：退出 4；用 `--force` 先记 `salvage`。
+- 钩子失败：退出 5；版本已保存。
+- 存储损坏或 `verify` 不一致：退出 6；先备份再按提示处理。
+- 版本已记录但写回失败：退出 7；修复权限后重试。
+- 权限或普通 IO 错误：退出 8。
+
+诊断信息在 `stderr`；`stdout` 只放数据。
+
+## 12. 清理演示环境
 
 ```sh
 cd /
-rm -rf "$T"
+rm -rf "$DEMO"
 ```
 
-## 19. 记录表
-
-| 编号 | 用例 | 结果 | 备注 |
-|---|---|---|---|
-| 1 | 构建与 `version` |  |  |
-| 2 | `init` 与归属 |  |  |
-| 3 | 纳管/历史/无改动 |  |  |
-| 4 | `show`/`dump`/`diff` |  |  |
-| 5 | `revert`/分歧/`--force` |  |  |
-| 6 | 符号链接/`..` |  |  |
-| 7 | 裁剪/对象回收 |  |  |
-| 8 | `mv`/身份 |  |  |
-| 9 | `ls`/`path`/`store`/JSON |  |  |
-| 10 | 钩子成功/失败/递归 |  |  |
-| 11 | 配置 |  |  |
-| 12 | `verify`/损坏/崩溃恢复 |  |  |
-| 13 | 并发 |  |  |
-| 14 | 退出码 |  |  |
-| 15 | 备份/恢复 |  |  |
-| 16 | Release 产物 |  |  |
-| 17 | 平台补充 |  |  |
+删除后不影响真实配置；演示中的 `BAKON_HOME` 只指向这个目录。
