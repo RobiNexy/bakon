@@ -50,7 +50,7 @@ pub fn version(format: Format) -> Result<u8> {
 }
 
 /// `edit`：首次自动纳管；编辑器退出后按需提交。编辑器阶段不持锁。
-pub fn edit(cli: &Cli, file: &Path, no_hook: bool, editor: Option<&str>) -> Result<u8> {
+pub fn edit(cli: &Cli, file: &Path, editor: Option<&str>) -> Result<u8> {
     let path = AbsPath::new(file)?;
     let (mut store, config) = open_edit_store(cli)?;
     let timeout = lock_timeout(cli);
@@ -107,7 +107,7 @@ pub fn edit(cli: &Cli, file: &Path, no_hook: bool, editor: Option<&str>) -> Resu
         (committed, manifest)
     };
 
-    if !no_hook {
+    if !cli.no_hook {
         run_hook(
             &hook_manifest,
             committed.version(),
@@ -120,7 +120,7 @@ pub fn edit(cli: &Cli, file: &Path, no_hook: bool, editor: Option<&str>) -> Resu
 }
 
 /// `revert`：恢复一个已记录版本，并把恢复本身记为新的 `revert` 版本。
-pub fn revert(cli: &Cli, file: &Path, version: u32, force: bool, no_hook: bool) -> Result<u8> {
+pub fn revert(cli: &Cli, file: &Path, version: u32, force: bool) -> Result<u8> {
     let path = AbsPath::new(file)?;
     let ver = Ver::parse(version)?;
     let mut store = open_store(cli)?;
@@ -204,7 +204,7 @@ pub fn revert(cli: &Cli, file: &Path, version: u32, force: bool, no_hook: bool) 
 
     match committed {
         Some(committed) => {
-            if !no_hook {
+            if !cli.no_hook {
                 run_hook(
                     &hook_manifest,
                     committed.version(),
@@ -339,7 +339,17 @@ pub fn hook(cli: &Cli, action: HookAction, file: &Path, command: Option<&str>) -
                 .resolve(&path)?
                 .ok_or_else(|| Error::NotManaged(path.clone()))?;
             store.set_hook(&guard, id, Some(command.to_owned()))?;
-            emit(&format!("hook set for {path}"))?;
+            match cli.format {
+                Format::Human => emit(&format!("hook set for {path}"))?,
+                Format::Plain => emit(&format!("{path}\tset\t{command}"))?,
+                Format::Json => emit(
+                    &serde_json::json!({
+                        "path": path.as_path().to_string_lossy(),
+                        "hook": command,
+                    })
+                    .to_string(),
+                )?,
+            }
         }
         HookAction::Unset => {
             let guard = store.begin_write(timeout)?;
@@ -347,7 +357,17 @@ pub fn hook(cli: &Cli, action: HookAction, file: &Path, command: Option<&str>) -
                 .resolve(&path)?
                 .ok_or_else(|| Error::NotManaged(path.clone()))?;
             store.set_hook(&guard, id, None)?;
-            emit(&format!("hook unset for {path}"))?;
+            match cli.format {
+                Format::Human => emit(&format!("hook unset for {path}"))?,
+                Format::Plain => emit(&format!("{path}\tunset"))?,
+                Format::Json => emit(
+                    &serde_json::json!({
+                        "path": path.as_path().to_string_lossy(),
+                        "hook": serde_json::Value::Null,
+                    })
+                    .to_string(),
+                )?,
+            }
         }
     }
     Ok(0)
@@ -359,12 +379,28 @@ pub fn config(cli: &Cli, action: ConfigAction) -> Result<u8> {
     match action {
         ConfigAction::Init => {
             let written = config::init(&path)?;
-            let line = if written {
-                format!("wrote {}", path.display())
-            } else {
-                format!("already exists, left untouched: {}", path.display())
-            };
-            emit(&line)?;
+            match cli.format {
+                Format::Human => {
+                    let line = if written {
+                        format!("wrote {}", path.display())
+                    } else {
+                        format!("already exists, left untouched: {}", path.display())
+                    };
+                    emit(&line)?;
+                }
+                Format::Plain => emit(&format!(
+                    "{}\t{}",
+                    path.display(),
+                    if written { "created" } else { "existing" }
+                ))?,
+                Format::Json => emit(
+                    &serde_json::json!({
+                        "config": path.display().to_string(),
+                        "created": written,
+                    })
+                    .to_string(),
+                )?,
+            }
         }
         ConfigAction::Show => {
             let config = config::load(&path)?;

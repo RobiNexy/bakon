@@ -27,6 +27,10 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "MS", default_value_t = 2000)]
     pub lock_timeout: u64,
 
+    /// Skip per-file hooks for this invocation
+    #[arg(long, global = true)]
+    pub no_hook: bool,
+
     #[command(subcommand)]
     pub command: Command,
 }
@@ -57,9 +61,6 @@ pub enum Command {
     Edit {
         /// File to edit
         file: PathBuf,
-        /// Skip the per-file hook
-        #[arg(long)]
-        no_hook: bool,
         /// Editor command for this invocation; overrides $VISUAL, $EDITOR and config
         #[arg(long, value_name = "CMD")]
         editor: Option<String>,
@@ -73,9 +74,6 @@ pub enum Command {
         /// Record the current divergent content as a salvage version first
         #[arg(long)]
         force: bool,
-        /// Skip the per-file hook
-        #[arg(long)]
-        no_hook: bool,
     },
     /// List recorded versions, newest first
     Log {

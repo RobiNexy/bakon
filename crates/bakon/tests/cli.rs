@@ -638,6 +638,62 @@ fn hook_can_be_shown_and_unset() {
 }
 
 #[test]
+fn hook_set_and_unset_honor_json_output() {
+    let fixture = Fixture::new(b"one");
+    let editor = editor_script(fixture.temp(), "exit 0");
+    assert_eq!(fixture.edit(&editor).status.code(), Some(0));
+
+    let set = fixture.run(&["--format", "json", "hook", "set", fixture.file(), "true"]);
+    assert_eq!(set.status.code(), Some(0), "stderr: {}", stderr(&set));
+    assert!(
+        stdout(&set).contains("\"hook\":\"true\""),
+        "stdout: {}",
+        stdout(&set)
+    );
+
+    let unset = fixture.run(&["--format", "json", "hook", "unset", fixture.file()]);
+    assert_eq!(unset.status.code(), Some(0), "stderr: {}", stderr(&unset));
+    assert!(
+        stdout(&unset).contains("\"hook\":null"),
+        "stdout: {}",
+        stdout(&unset)
+    );
+}
+
+#[test]
+fn global_no_hook_works_before_the_subcommand() {
+    let fixture = Fixture::new(b"one");
+    let directory = fixture.temp();
+    let no_change = editor_script_named(directory, "noop.sh", "exit 0");
+    assert_eq!(fixture.edit(&no_change).status.code(), Some(0));
+
+    let marker = directory.join("hook-ran");
+    let hook = format!("touch {}", marker.display());
+    assert_eq!(
+        fixture
+            .run(&["hook", "set", fixture.file(), &hook])
+            .status
+            .code(),
+        Some(0)
+    );
+
+    let editor = editor_script_named(directory, "change.sh", "printf 'two' > \"$1\"");
+    let output = run_with_env(
+        &[
+            "--store",
+            fixture.store(),
+            "--no-hook",
+            "edit",
+            fixture.file(),
+        ],
+        &[("EDITOR", editor.as_path())],
+    );
+
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    assert!(!marker.exists(), "global --no-hook must skip the hook");
+}
+
+#[test]
 fn prune_trims_old_versions_and_dry_run_changes_nothing() {
     let fixture = Fixture::new(b"one");
     let directory = fixture.temp();
@@ -981,6 +1037,14 @@ fn config_init_and_show_are_usable() {
 
     let again = run(&["--config", path_arg, "config", "init"]);
     assert!(stdout(&again).contains("already exists"));
+
+    let json = run(&["--config", path_arg, "--format", "json", "config", "init"]);
+    assert_eq!(json.status.code(), Some(0), "stderr: {}", stderr(&json));
+    assert!(
+        stdout(&json).contains("\"created\":false"),
+        "stdout: {}",
+        stdout(&json)
+    );
 
     let show = run(&["--config", path_arg, "--format", "json", "config", "show"]);
     assert_eq!(show.status.code(), Some(0), "stderr: {}", stderr(&show));

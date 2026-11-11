@@ -75,7 +75,7 @@ $$\mathrm{projected}(S)=\{\,f\mid D(f)=\mathrm{content}(\mathrm{head}(M(f)))\,\}
 | A-09 | `StoreLock` 不区分读写；写接口不要求 guard；`Store::committed` 可绕过 pending | P2（已修复） | $\mathbf{P_5}$ |
 | A-10 | 测试套件依赖 `sh`、可执行脚本与 `/tmp` 断言；Windows 全量测试不可用 | P2 | 跨平台质量门 |
 | A-11 | 一份损坏清单使 `verify` 在孤儿扫描处整体失败，已收集的报告项丢失 | P2（已修复） | $\mathbf{P_3}$ |
-| A-12 | `hook set/unset`、`config init` 忽略 `--format json`；全局 `--no-hook`/`--no-color` 未实现 | P2 | $\mathbf{P_8}$ |
+| A-12 | `hook set/unset`、`config init` 忽略 `--format json`；全局 `--no-hook`/`--no-color` 未实现 | P2（已修复） | $\mathbf{P_8}$ |
 | A-13 | 只读存储无法读取：共享锁仍以读写方式打开 `.lock` | P3 | $\mathbf{P_8}$ |
 | A-14 | 清单头为 `u32::MAX` 时 `verify` 接受，下一次提交返回内部错误 70 | P3 | $\mathbf{P_3}$ |
 | A-15 | `files/`、根目录中的清单/索引/pending 临时文件没有清理路径 | P3 | $\mathbf{P_1},\mathbf{P_{12}}$ |
@@ -282,7 +282,7 @@ $$\mathrm{projected}(S)=\{\,f\mid D(f)=\mathrm{content}(\mathrm{head}(M(f)))\,\}
 | 函数 | 契约 | 结论 |
 |---|---|---|
 | `Cli::parse_args` | clap 解析 | 正确；clap 错误直接退出 2 |
-| `Format` / `Command` / `HookAction` / `StoreAction` / `ConfigAction` | 命令模型 | 基本正确；`diff` 参数命名与帮助见 A-17；全局 `--no-hook`/`--no-color` 缺失，见 A-12 |
+| `Format` / `Command` / `HookAction` / `StoreAction` / `ConfigAction` | 命令模型 | 基本正确；`diff` 参数命名与帮助见 A-17；`--no-hook` 已提升为全局，`--no-color` 从文档删除（A-12 已修复） |
 | `run` / `dispatch` | 解析、执行、错误到退出码 | 正确；错误写 stderr，数据写 stdout 的约定基本成立 |
 
 **命令**
@@ -358,7 +358,7 @@ $$\mathrm{projected}(S)=\{\,f\mid D(f)=\mathrm{content}(\mathrm{head}(M(f)))\,\}
 | R-07 | 将存储设为只读，执行 `log` | 退出 8，`I/O error: Permission denied` | A-13 |
 | R-08 | 把单版本清单的 `ver` 改为 `4294967295`，执行 `verify`，再执行 `edit` | `verify` 返回 0；`edit` 返回 70 “version number overflow” | A-14 |
 | R-09 | 破坏一个清单后执行 `verify` 或 `verify --format json` | 修复后退出 6，保留 `manifest` 与 `orphan_scan` 等报告项；修复前只打印 `corrupt manifest` | A-11 |
-| R-10 | `--format json hook set <file> true`、`--format json config init` | 输出人类文本而非 JSON | A-12 |
+| R-10 | `--format json hook set <file> true`、`--format json config init` | 修复后输出 JSON；修复前输出人类文本 | A-12 |
 | R-11 | 跟踪 v0=one、v1=two、v2=three，执行 `diff <file> 1` | 比较 v0 与 v1，而帮助把第一个参数描述为 older | A-17 |
 | R-12 | 公共 API 以同一 `FileId` 两次调用 `prune([id,id])` | 修复后去重并正常完成；修复前 debug 下溢 panic | A-05 |
 | R-13 | 公共 API 对同一路径两次 `prepare_track`/`commit` | 修复后第二次 `AlreadyManaged`，只有一份清单；修复前两份 | A-04 |
@@ -392,7 +392,7 @@ $$\mathrm{projected}(S)=\{\,f\mid D(f)=\mathrm{content}(\mathrm{head}(M(f)))\,\}
 
 **A-11 `verify` 的整体失败。** `verify` 先把损坏清单收集为报告项，随后 `orphan_hashes()` 调用 `referenced_blobs()`（`crates/bakon-core/src/store/verify.rs:63-74, 216`；`store/mod.rs:593-601`），后者对每个 id 调用 `manifest(id)?`；任一份损坏清单返回 6，整个 `verify` 以错误结束，已收集的报告项与 `--size` 结果全部丢失。已修复：`verify` 只用成功解析的清单构造引用集；存在损坏清单时额外报告 `orphan_scan`（不可修复），并且 `--fix` 不回收任何对象、不改索引，避免把损坏清单仍引用的对象当成孤儿删除。上述 R-09 现在退出 6，同时保留 `manifest` 与 `orphan_scan` 报告项。
 
-**A-12 CLI 输出与全局参数。** `hook set`/`hook unset`/`config init` 没有 `cli.format` 分支（`crates/bakon-cli/src/commands.rs:321-341, 350-358`），`--format json` 下仍输出人类文本；API §5 把 `--no-hook` 与 `--no-color` 列为全局参数，但 `Cli` 只有 `--store`、`--config`、`--format`、`--lock-timeout`，全局位置传入这两个参数会退出 2。`--no-hook` 只在 `edit`/`revert` 子命令上存在。修复：状态类命令补 JSON/plain 输出；把 `no_hook` 提升为全局并与子命令合并，或修正文档；`--no-color` 当前无颜色输出，可删除或实现。
+**A-12 CLI 输出与全局参数。** `hook set`/`hook unset`/`config init` 没有 `cli.format` 分支（`crates/bakon-cli/src/commands.rs:321-341, 350-358`），`--format json` 下仍输出人类文本；API §5 把 `--no-hook` 与 `--no-color` 列为全局参数，但 `Cli` 只有 `--store`、`--config`、`--format`、`--lock-timeout`，全局位置传入这两个参数会退出 2。`--no-hook` 只在 `edit`/`revert` 子命令上存在。已修复：`hook set/unset` 与 `config init` 现在都有 human/plain/json 三种输出；`--no-hook` 提升为 clap 全局参数，子命令前后位置都可使用；`--no-color` 从 API 文档删除，因为输出本来不使用颜色。上述 R-10 现在返回可解析的 JSON。
 
 ### 6.3 P3
 
@@ -467,7 +467,7 @@ A-07 说明 `AbsPath` 的等价关系不是内核等价关系：词法折叠把�
 | 2 | A-09 | `ReadLock`/`WriteLock`；写接口收 guard | 已修复：共享锁/未持锁调用不可编译；`compile_fail,E0308` 文档用例通过 |
 | 2 | A-10 | 测试路径用 `TempDir`；脚本按平台门控 | Windows/macOS runner 全量 `cargo test` |
 | 2 | A-11 | 引用集只用有效清单；损坏清单单独报告 | 已修复：一份损坏 + 一个孤儿对象，`verify` 同时报告 `manifest`/`orphan_scan`，`--fix` 不删对象 |
-| 2 | A-12 | 状态命令补 JSON；全局参数或文档 | 每个命令 `--format json` 输出可解析；`--no-hook` 全局位置可用 |
+| 2 | A-12 | 状态命令补 JSON；全局参数或文档 | 已修复：`hook set/unset`、`config init` 的 JSON 可解析；`--no-hook` 全局位置可用 |
 | 2 | A-20 | 定义 `rename` 后 `fsync` 失败的提交语义；故障注入 | 失败后重跑不产生重复版本，且用户能判断是否已提交 |
 | 3 | A-13 至 A-19 | 见第 6 节 | 对应单元/端到端用例 |
 | 3 | O-01 至 O-13 | 见第 6.4 节 | 文档同步或小修 |
@@ -481,7 +481,7 @@ A-07 说明 `AbsPath` 的等价关系不是内核等价关系：词法折叠把�
 - `cargo fmt --all --check`：通过。
 - R-01 至 R-11 与 R-14 使用真实二进制与隔离存储复现；R-12/R-13 已转为 `store` 单元回归用例。
 - 0600 文件的对象权限、只读存储、损坏清单、`u32::MAX` 清单、`.pending` 缺失清单均按第 5 节观测。
-- A-20 的退出码 9 实现后测试总数为 123；A-01 至 A-09 与 A-11 修复后为 140，另有 1 个 `compile_fail` 文档用例；本节的 120 是审计时基线。
+- A-20 的退出码 9 实现后测试总数为 123；A-01 至 A-09、A-11 与 A-12 修复后为 142，另有 1 个 `compile_fail` 文档用例；本节的 120 是审计时基线。
 
 ### 9.2 未覆盖
 

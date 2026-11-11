@@ -115,12 +115,12 @@ pub enum Error {
 | 命令 | 参数 | 行为 |
 |---|---|---|
 | `bakon init` | `--store` | 创建存储目录与标记；已存在且合法则无操作 |
-| `bakon edit <file>` | `--no-hook`、`--editor <cmd>` | 首次自动纳管；编辑器退出后按需提交 |
+| `bakon edit <file>` | `--editor <cmd>`（全局 `--no-hook`） | 首次自动纳管；编辑器退出后按需提交 |
 | `bakon log <file>` | `--format` | 最新在前；大小取自清单 |
 | `bakon diff <file> [v1] [v2]` | — | 0 个参数比较最近两版；1 个参数与其前一版比较 |
 | `bakon show <file> <v>` | — | 原始字节输出 |
 | `bakon dump <file> <v>` | — | 与 `show` 相同，保留为管道命令名 |
-| `bakon revert <file> <v>` | `--force`、`--no-hook` | 分歧默认拒绝；`--force` 先记 `salvage` |
+| `bakon revert <file> <v>` | `--force`（全局 `--no-hook`） | 分歧默认拒绝；`--force` 先记 `salvage` |
 | `bakon ls` | — | 排序后的路径列表 |
 | `bakon mv <old> <new>` | — | 只改映射，不动磁盘文件 |
 | `bakon prune [<file>]` | `--dry-run` | 默认按保留上限；不重写历史 |
@@ -131,7 +131,7 @@ pub enum Error {
 | `bakon version` | `--format json` | 版本与目标三元组 |
 | `bakon store <path\|size>` | — | 存储位置与占用汇总 |
 
-全局：`--store`、`--config`、`--format human|plain|json`、`--no-color`、`--no-hook`、`--lock-timeout`。
+全局：`--store`、`--config`、`--format human|plain|json`、`--no-hook`、`--lock-timeout`。输出不使用颜色，因此没有 `--no-color`。
 
 `edit` 的编辑器取 `--editor` → `$VISUAL` → `$EDITOR` → 配置 `editor` → `vi`；诊断与进度走 stderr，stdout 只放数据。
 
