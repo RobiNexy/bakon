@@ -70,6 +70,12 @@ bakon edit ./nginx.conf
 
 编辑器打开后，把 `listen 80;` 改成 `listen 8080;`，保存退出。
 
+如果不想改 `$EDITOR`，也可以在命令末尾指定编辑器：
+
+```sh
+bakon edit ./nginx.conf --editor nano
+```
+
 应当看到：
 
 ```text
