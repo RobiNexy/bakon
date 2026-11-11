@@ -52,7 +52,7 @@
 | 2 读目标版本内容 | 无 | 无变化 | 6（对象损坏） |
 | 3 分歧检查：$D(p)$ 存在且不等于 $\mathrm{head}$ | 无 | 默认拒绝 | 4 |
 | 4 `--force` 时先把当前内容记为 `salvage` 版本 | $\mathrm{Put}_O$、$\mathrm{Put}_M$ | 分歧内容已入档 | 8/9 |
-| 5 若目标内容等于 $\mathrm{head}$：仅补写目标文件 | 无 | 见步骤 7 | 0 |
+| 5 若目标内容等于 $\mathrm{head}$：存在则 no-op，缺失才创建 | 无 | 见步骤 7 | 0 |
 | 6 写对象、追加清单（$\mathrm{pending}=1$） | $\mathrm{Put}_O$、$\mathrm{Put}_M$ | 版本已存在 | 8/9 |
 | 7 写回目标文件 | $\mathrm{Write}_D$ | 文件已更新或未更新 | 7 |
 | 8 清除 $\mathrm{pending}$ | $\mathrm{Put}_M$ | 标记可能残留 | 8/9 |

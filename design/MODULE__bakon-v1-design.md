@@ -73,7 +73,7 @@ store/
 ### 5.1 纳管
 
 1. 规范化路径，查缓存；未命中则扫描清单，仍未命中则新建。
-2. 生成 `FileId`（16 字节随机），检查未与现有 id 冲突。
+2. 生成 `FileId`（16 字节随机），检查未与现有 id 冲突；提交时再次检查路径键未被任何清单占用。
 3. 读取目标内容，`put_object` 得 `BlobHash`。
 4. 构造清单：`versions = [v0: baseline]`，`retention = Inherit`，`hook = 空`。
 5. 原子写入 `files/<id>.json`，更新缓存。

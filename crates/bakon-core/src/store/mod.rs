@@ -180,9 +180,26 @@ impl Store {
         }
     }
 
-    /// 打开已存在的存储；不关心是否刚刚创建。
+    /// 打开已存在的存储；不存在、空目录或无标记的目录返回 `NotAStore`，不创建。
     pub fn open(root: impl AsRef<Path>) -> Result<Self> {
-        Self::init(root).map(|(store, _)| store)
+        let root = AbsPath::new(root)?;
+        let marker_path = root.as_path().join(MARKER_FILE);
+
+        match fs::metadata(root.as_path()) {
+            Ok(metadata) if !metadata.is_dir() => Err(Error::Io(io::Error::new(
+                io::ErrorKind::NotADirectory,
+                format!("not a directory: {}", root.as_path().display()),
+            ))),
+            Ok(_) if marker_path.is_file() => {
+                let marker = read_marker(&marker_path)?;
+                marker.validate()?;
+                ensure_layout(&root)?;
+                Ok(Self::compose(root, marker))
+            }
+            Ok(_) => Err(Error::NotAStore { root }),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Err(Error::NotAStore { root }),
+            Err(error) => Err(Error::Io(error)),
+        }
     }
 
     pub fn root(&self) -> &AbsPath {
@@ -326,6 +343,11 @@ impl Store {
     /// `expected_head` 是调用方在进入编辑器前读到的 head；不一致即冲突退出。
     pub fn commit(&mut self, prepared: Prepared, expected_head: Option<Ver>) -> Result<Committed> {
         let id = prepared.manifest.id;
+        if expected_head.is_none() && self.resolve(&prepared.manifest.path)?.is_some() {
+            return Err(Error::AlreadyManaged {
+                path: prepared.manifest.path.clone(),
+            });
+        }
         let current = self.load_manifest_optional(id)?;
         let actual = current.as_ref().and_then(Manifest::max_ver);
 
@@ -505,6 +527,13 @@ impl Store {
     ///
     /// `dry_run` 只报告，不移动对象、不写清单。调用方必须持有排他锁。
     pub fn prune(&mut self, ids: &[FileId], dry_run: bool) -> Result<PruneReport> {
+        let unique: Vec<FileId> = ids
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let ids = unique.as_slice();
         let all_ids = self.list_ids()?;
         let selected: BTreeSet<FileId> = ids.iter().copied().collect();
         let mut selected_manifests = BTreeMap::new();
@@ -564,8 +593,12 @@ impl Store {
 
             let mut candidates = Vec::new();
             for record in &removed {
-                let count = counts.get_mut(&record.blob).expect("blob was counted");
-                *count -= 1;
+                let count = counts.get_mut(&record.blob).ok_or_else(|| {
+                    Error::Internal(format!("blob {} was not counted", record.blob))
+                })?;
+                *count = count.checked_sub(1).ok_or_else(|| {
+                    Error::Internal(format!("blob {} count underflow", record.blob))
+                })?;
                 if *count == 0 {
                     candidates.push(record.blob);
                 }
@@ -1254,6 +1287,30 @@ mod tests {
     }
 
     #[test]
+    fn open_does_not_create_a_missing_store() {
+        let temporary = TempDir::new().unwrap();
+        let root = temporary.path().join("store");
+
+        let error = Store::open(&root).unwrap_err();
+
+        assert!(matches!(error, Error::NotAStore { .. }));
+        assert_eq!(error.exit_code(), 6);
+        assert!(!root.exists());
+    }
+
+    #[test]
+    fn open_does_not_initialize_an_empty_directory() {
+        let temporary = TempDir::new().unwrap();
+        let root = temporary.path().join("store");
+        fs::create_dir_all(&root).unwrap();
+
+        let error = Store::open(&root).unwrap_err();
+
+        assert!(matches!(error, Error::NotAStore { .. }));
+        assert!(!root.join(MARKER_FILE).exists());
+    }
+
+    #[test]
     fn non_empty_directory_without_marker_is_refused() {
         let temporary = TempDir::new().unwrap();
         fs::write(temporary.path().join("notes.txt"), b"not a store").unwrap();
@@ -1339,6 +1396,21 @@ mod tests {
         assert_eq!(manifest.path, file);
         assert_eq!(store.content(manifest.versions[0].blob).unwrap(), b"one");
         assert_eq!(store.content(manifest.versions[1].blob).unwrap(), b"two");
+    }
+
+    #[test]
+    fn commit_refuses_a_duplicate_tracked_path() {
+        let (_temporary, mut store) = open_store();
+        let file = path("duplicate-track");
+        let first = store.prepare_track(&file, b"one").unwrap();
+        store.commit(first, None).unwrap();
+        let second = store.prepare_track(&file, b"two").unwrap();
+
+        let error = store.commit(second, None).unwrap_err();
+
+        assert!(matches!(error, Error::AlreadyManaged { .. }));
+        assert_eq!(error.exit_code(), 4);
+        assert_eq!(store.all_ids().unwrap().len(), 1);
     }
 
     #[test]
@@ -1504,6 +1576,28 @@ mod tests {
             .unwrap();
         assert!(report.ok());
         assert!(store.orphan_hashes().unwrap().is_empty());
+    }
+
+    #[test]
+    fn prune_accepts_duplicate_ids() {
+        let (_temporary, mut store) = open_store();
+        let file = path("duplicate-prune");
+        let baseline = store.prepare_track(&file, b"one").unwrap();
+        let committed = store.commit(baseline, None).unwrap();
+        let next = store
+            .prepare_commit(committed.id(), b"two", Source::Edit)
+            .unwrap();
+        store.commit(next, Some(Ver::ZERO)).unwrap();
+        store.set_default_max_versions(1);
+
+        let report = store
+            .prune(&[committed.id(), committed.id()], false)
+            .unwrap();
+
+        assert_eq!(report.files.len(), 1);
+        assert_eq!(report.removed(), 1);
+        assert_eq!(store.manifest(committed.id()).unwrap().versions.len(), 1);
+        assert_eq!(store.objects().list_hashes().unwrap().len(), 1);
     }
 
     #[test]

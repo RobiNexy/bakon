@@ -170,6 +170,17 @@ fn init_creates_a_store_and_is_idempotent() {
 }
 
 #[test]
+fn verify_does_not_create_a_missing_store() {
+    let temporary = TempDir::new().unwrap();
+    let store = temporary.path().join("store");
+
+    let output = run(&["--store", store.to_str().unwrap(), "verify"]);
+
+    assert_eq!(output.status.code(), Some(6), "stderr: {}", stderr(&output));
+    assert!(!store.exists(), "verify must not create a store");
+}
+
+#[test]
 fn init_does_not_delete_a_marker_shaped_user_file() {
     let temporary = TempDir::new().unwrap();
     let store = temporary.path().join("store");
@@ -345,6 +356,7 @@ fn dump_matches_show() {
 #[test]
 fn log_on_an_untracked_file_exits_three() {
     let fixture = Fixture::new(b"never tracked");
+    assert_eq!(fixture.run(&["init"]).status.code(), Some(0));
 
     let output = fixture.run(&["log", fixture.file()]);
 
@@ -424,6 +436,24 @@ fn editing_a_directory_exits_three() {
         "stderr: {}",
         stderr(&output)
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn revert_to_head_does_not_rewrite_a_read_only_file() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = Fixture::new(b"one");
+    let noop = editor_script(fixture.temp(), "exit 0");
+    assert_eq!(fixture.edit(&noop).status.code(), Some(0));
+    fs::set_permissions(fixture.file(), fs::Permissions::from_mode(0o444)).unwrap();
+
+    let output = fixture.run(&["revert", fixture.file(), "0"]);
+
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    assert_eq!(fs::read(fixture.file()).unwrap(), b"one");
+    assert!(!Path::new(fixture.store()).join(".pending").exists());
+    fs::set_permissions(fixture.file(), fs::Permissions::from_mode(0o644)).unwrap();
 }
 
 #[test]

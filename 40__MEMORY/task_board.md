@@ -6,10 +6,6 @@
 
 > 审计来源：[[design-audit-2026-11-10]]、[[design-audit-v1-2026-11-10]]、[[design-audit-v1-2026-11-10-recheck]]、[[design-audit-v1-2026-11-11]]；v1 设计入口：[[MODULE__bakon-v1-design]]。
 
-- P2 v1 全量审计：`revert` 的已匹配分支经 `Committed::apply` 写回，没有 pending 保护（A-03）
-- P2 v1 全量审计：公共 `prepare_track`/`commit` 不检查路径唯一，可产生同路径清单（A-04）
-- P2 v1 全量审计：`prune` 接收重复 `FileId` 时计数下溢/panic（A-05）
-- P2 v1 全量审计：`Store::open` 自动创建存储，读命令在错误路径上产生副作用，`verify` 返回 0（A-06）
 - P2 v1 全量审计：`..` 经过普通文件/缺失前缀时按词法折叠，路径身份与内核不一致（A-07）
 - P2 v1 全量审计：对象与存储目录权限随 `umask`，0600 文件内容可能以 0664 存放（A-08）
 - P2 v1 全量审计：读写锁未类型化，写接口不要求 guard（A-09，取代原复审残余条目）

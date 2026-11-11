@@ -52,7 +52,7 @@ pub fn version(format: Format) -> Result<u8> {
 /// `edit`：首次自动纳管；编辑器退出后按需提交。编辑器阶段不持锁。
 pub fn edit(cli: &Cli, file: &Path, no_hook: bool, editor: Option<&str>) -> Result<u8> {
     let path = AbsPath::new(file)?;
-    let (mut store, config) = open_store_with(cli)?;
+    let (mut store, config) = open_edit_store(cli)?;
     let timeout = lock_timeout(cli);
 
     let (id, head, content_hash) = {
@@ -140,6 +140,7 @@ pub fn revert(cli: &Cli, file: &Path, version: u32, force: bool, no_hook: bool) 
             detail: format!("{id} has no versions"),
         })?;
         let current = read_if_exists(&path)?;
+        let current_exists = current.is_some();
         let old_blob = current.as_ref().map(|bytes| hash_bytes(bytes));
         let new_blob = hash_bytes(&target_content);
         let diverged = current
@@ -169,10 +170,14 @@ pub fn revert(cli: &Cli, file: &Path, version: u32, force: bool, no_hook: bool) 
         })?;
 
         if head.blob == target.blob {
-            store
-                .committed(id, head.ver)?
-                .apply(&store, &path)
-                .map_err(|error| applied(error, head.ver))?;
+            // 目标已经等于记录内容时不要重写：原地截断只会制造一个没有 pending
+            // 保护的写回窗口。只有目标缺失时才需要创建。
+            if !current_exists {
+                store
+                    .committed(id, head.ver)?
+                    .apply(&store, &path)
+                    .map_err(|error| applied(error, head.ver))?;
+            }
             (None, manifest, previous)
         } else {
             let mut prepared = store.prepare_commit(id, &target_content, Source::Revert)?;
@@ -969,12 +974,22 @@ fn load_config(cli: &Cli) -> Result<Config> {
 }
 
 fn open_store(cli: &Cli) -> Result<Store> {
-    open_store_with(cli).map(|(store, _)| store)
+    open_store_with(cli, false).map(|(store, _)| store)
 }
 
-fn open_store_with(cli: &Cli) -> Result<(Store, Config)> {
+/// `edit` 首次使用时可以初始化空目录；其他命令必须打开已有存储。
+fn open_edit_store(cli: &Cli) -> Result<(Store, Config)> {
+    open_store_with(cli, true)
+}
+
+fn open_store_with(cli: &Cli, auto_init: bool) -> Result<(Store, Config)> {
     let config = load_config(cli)?;
-    let mut store = Store::open(store_path(cli, &config)?)?;
+    let path = store_path(cli, &config)?;
+    let mut store = if auto_init {
+        Store::init(path)?.0
+    } else {
+        Store::open(path)?
+    };
     store.set_default_max_versions(config.max_versions());
     Ok((store, config))
 }

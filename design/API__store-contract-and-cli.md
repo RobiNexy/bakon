@@ -54,7 +54,7 @@ impl Committed {
 
 | 方法 | 前置 | 后置 | 失败 |
 |---|---|---|---|
-| `Store::open(root, mode)` | 目录归属符合 [[OPS__store-identity-recovery-and-retention]] | 打开并校验；不执行 `.pending` 恢复 | 6（未初始化、schema 不符）、8（权限） |
+| `Store::open(root, mode)` | 目录归属符合 [[OPS__store-identity-recovery-and-retention]] | 打开并校验，不创建；不执行 `.pending` 恢复 | 6（未初始化、schema 不符）、8（权限） |
 | `resolve(&AbsPath) -> Option<FileId>` | — | 命中缓存或扫描清单；结果可缓存 | 6（清单损坏） |
 | `manifest(FileId) -> Manifest` | id 存在 | — | 3（不存在）、6（损坏） |
 | `head(FileId) -> Option<VersionRecord>` | — | 返回最后一条版本 | 6 |
@@ -62,7 +62,7 @@ impl Committed {
 | `versions(FileId) -> &[VersionRecord]` | — | 升序 | 6 |
 | `begin_write() -> WriteGuard` | — | 持排他锁并恢复 `.pending`；无法证明的记录保留并退出 6 | 4、8、6 |
 | `begin_verify() -> WriteGuard` | — | 持排他锁但不自动恢复；供 `verify --fix` 先报告再处理 `.pending` | 4、8 |
-| `commit(Prepared) -> Committed` | 持有 `WriteGuard`，head 未变 | 追加版本、必要时裁剪 | 4（head 变化）、8、9（持久性未确认）、6 |
+| `commit(Prepared) -> Committed` | 持有 `WriteGuard`，head 未变；track 时路径未占用 | 追加版本、必要时裁剪 | 4（head 变化/路径已占用）、8、9（持久性未确认）、6 |
 | `prune(&[FileId]) -> PruneReport` | 持有 `WriteGuard` | 截断后缀、回收对象 | 8 |
 | `rename(FileId, AbsPath)` | 持有 `WriteGuard` | 更新清单 `path` 与缓存 | 4（目标已存在） |
 | `verify(options) -> Report` | — | 只读；`--fix` 时持排他锁 | 6、9（修复时持久性未确认） |

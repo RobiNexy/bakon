@@ -66,10 +66,10 @@ $$\mathrm{projected}(S)=\{\,f\mid D(f)=\mathrm{content}(\mathrm{head}(M(f)))\,\}
 |---|---|---|---|
 | A-01 | `init` 把 `BAKON_STORE.*.tmp` 形状的普通文件当作自己的临时文件删除 | P1（已修复） | $\mathbf{P_2}$ |
 | A-02 | 恢复对缺失清单或未提交 pending 返回成功并删除 `.pending`；`verify --fix` 随后报告一致 | P1（已修复） | $\mathbf{P_3},\mathbf{P_4}$ |
-| A-03 | `revert` 的“已匹配”分支经 `Committed::apply` 写回，没有 `.pending` 保护 | P2 | $\mathbf{P_4},\mathbf{P_5}$ |
-| A-04 | 公共 `prepare_track`/`commit` 不检查路径唯一，可产生两份同路径清单 | P2 | $\mathbf{P_5},\mathbf{P_9}$ |
-| A-05 | `prune` 接收重复 `FileId` 时计数下溢，debug 构建 panic | P2 | $\mathbf{P_1},\mathbf{P_6}$ |
-| A-06 | `Store::open` 等价于 `init`；读命令会在错误路径上创建存储，`verify` 还会返回 0 | P2 | $\mathbf{P_2},\mathbf{P_3}$ |
+| A-03 | `revert` 的“已匹配”分支经 `Committed::apply` 写回，没有 `.pending` 保护 | P2（已修复） | $\mathbf{P_4},\mathbf{P_5}$ |
+| A-04 | 公共 `prepare_track`/`commit` 不检查路径唯一，可产生两份同路径清单 | P2（已修复） | $\mathbf{P_5},\mathbf{P_9}$ |
+| A-05 | `prune` 接收重复 `FileId` 时计数下溢，debug 构建 panic | P2（已修复） | $\mathbf{P_1},\mathbf{P_6}$ |
+| A-06 | `Store::open` 等价于 `init`；读命令会在错误路径上创建存储，`verify` 还会返回 0 | P2（已修复） | $\mathbf{P_2},\mathbf{P_3}$ |
 | A-07 | `..` 前面是普通文件或缺失路径时仍按词法折叠，路径身份与内核不一致 | P2 | $\mathbf{P_7}$ |
 | A-08 | 对象与存储目录使用默认 `umask` 权限；0600 文件内容可写成 0664 对象 | P2 | $\mathbf{P_{11}}$ |
 | A-09 | `StoreLock` 不区分读写；写接口不要求 guard；`Store::committed` 可绕过 pending | P2 | $\mathbf{P_5}$ |
@@ -237,7 +237,7 @@ $$\mathrm{projected}(S)=\{\,f\mid D(f)=\mathrm{content}(\mathrm{head}(M(f)))\,\}
 
 | 函数 | 契约 | 结论 |
 |---|---|---|
-| `prune` | 选择清单、裁剪、移动候选、清 trash | 基本正确；重复 id 下溢，见 A-05；全库引用扫描的成本仍与全库版本数相关（V1-11 残余） |
+| `prune` | 选择清单、裁剪、移动候选、清 trash | 基本正确；重复 id 已去重并用 checked 计数（A-05 已修复）；全库引用扫描的成本仍与全库版本数相关（V1-11 残余） |
 | `move_to_trash` | `rename` 到 `trash` | 正确；未 `fsync` 目录，崩溃后最多留下可重试残留 |
 | `referenced_blobs` | 全库引用集 | 正确；任一清单损坏即整体失败 |
 | `reclaim_removed` | 回收被裁剪且无引用对象 | 正确；失败只留下孤儿，由后续 verify/prune 收敛 |
@@ -293,8 +293,8 @@ $$\mathrm{projected}(S)=\{\,f\mid D(f)=\mathrm{content}(\mathrm{head}(M(f)))\,\}
 | `init` | 初始化并输出 | 正确；未持锁（O-12） |
 | `version` | 版本与目标 | 正确 |
 | `edit` | 纳管、编辑器、CAS 提交、钩子 | 主路径正确；编辑器后路径被改名/重纳管返回内部错误 70（O-02）；读到的编辑内容在恢复后未重读，但 `expected_head` CAS 会阻止已推进头的提交（本次未构造反例） |
-| `revert` | 分歧检查、salvage、pending、写回、钩子 | 主路径正确；“已匹配”分支无 pending，见 A-03；读取目标版本用 `content` 而非 `content_for`，见 A-18；`finish_apply` 失败映射为 8 而非 7（O-07） |
-| `prune` | 共享/排他锁、单文件/全库、输出 | 正确；库层重复 id 问题见 A-05 |
+| `revert` | 分歧检查、salvage、pending、写回、钩子 | 主路径正确；“已匹配”且目标存在时 no-op（A-03 已修复）；读取目标版本用 `content` 而非 `content_for`，见 A-18；`finish_apply` 失败映射为 8/9（O-07 已修正） |
+| `prune` | 共享/排他锁、单文件/全库、输出 | 正确；库层重复 id 已由 A-05 修复 |
 | `mv` | 改映射 | 正确；`rename` 的锁约定见 A-09 |
 | `hook` | show/set/unset | 语义正确；JSON 输出缺失，见 A-12 |
 | `config` | show/init | 语义正确；init 忽略格式，见 A-12 |
@@ -310,7 +310,7 @@ $$\mathrm{projected}(S)=\{\,f\mid D(f)=\mathrm{content}(\mathrm{head}(M(f)))\,\}
 | `warn_trim` / `applied` | 裁剪警告与写回映射 | 正确；`trim_failed` 信息不足见 A-19 |
 | `run_hook` / `run_shell_with_env` | 锁外钩子 | 正确；`BAKON_HOOK` 防递归；不保证执行 |
 | `run_editor` / `run_shell` / `shell_quote` | 编辑器启动与引用 | Unix 正确；Windows `%` 展开与 `cmd` 引用未验证（O-10） |
-| `load_config` / `open_store` / `open_store_with` | 配置与打开 | 打开即初始化，见 A-06 |
+| `load_config` / `open_store` / `open_store_with` | 配置与打开 | 已拆分：首次 `edit` 用 `init`，其他命令用 `open`（A-06 已修复） |
 | `store_path` / `editor_command` / `home_dir` | 优先级 | 基本正确；Windows 仅用 `USERPROFILE` |
 | `lock_timeout` / `emit` | 超时与输出 | 正确；`emit` 的 broken pipe 见 O-09 |
 
@@ -353,7 +353,7 @@ $$\mathrm{projected}(S)=\{\,f\mid D(f)=\mathrm{content}(\mathrm{head}(M(f)))\,\}
 | R-01 | 创建只含 `BAKON_STORE.notes.tmp`（内容为用户数据）的目录，执行 `init` | 修复后退出 6，文件保留；修复前退出 0 且文件被删除 | A-01 |
 | R-02 | 初始化空存储，写入指向不存在 `FileId` 的合法 `.pending`，执行 `verify` | 退出 6，报告 `pending_apply` | A-02 |
 | R-03 | 对 R-02 执行 `verify --fix` | 修复后退出 6，`.pending` 保留；修复前退出 0 并删除 | A-02 |
-| R-04 | `--store <不存在路径> verify` | 退出 0，输出 `store is consistent`，并创建标记、布局与 `.lock` | A-06 |
+| R-04 | `--store <不存在路径> verify` | 修复后退出 6，路径不存在；修复前退出 0 并创建标记、布局与 `.lock` | A-06 |
 | R-05 | 目录中有普通文件 `blocker` 与 `victim`，执行 `edit <dir>/blocker/../victim` | 内核读取该路径返回 ENOTDIR；`bakon` 退出 0 并把 `<dir>/victim` 纳管 | A-07 |
 | R-06 | 纳管 0600 文件，检查对象权限 | 对象与清单为 0664，目录为 0775（受 `umask` 影响） | A-08 |
 | R-07 | 将存储设为只读，执行 `log` | 退出 8，`I/O error: Permission denied` | A-13 |
@@ -361,8 +361,8 @@ $$\mathrm{projected}(S)=\{\,f\mid D(f)=\mathrm{content}(\mathrm{head}(M(f)))\,\}
 | R-09 | 破坏一个清单后执行 `verify` 或 `verify --format json` | 只打印 `corrupt manifest`，退出 6；没有报告其余项 | A-11 |
 | R-10 | `--format json hook set <file> true`、`--format json config init` | 输出人类文本而非 JSON | A-12 |
 | R-11 | 跟踪 v0=one、v1=two、v2=three，执行 `diff <file> 1` | 比较 v0 与 v1，而帮助把第一个参数描述为 older | A-17 |
-| R-12 | 公共 API 以同一 `FileId` 两次调用 `prune([id,id])`（临时测试，已删除） | debug 构建在 `*count -= 1` 处下溢 panic | A-05 |
-| R-13 | 公共 API 对同一路径两次 `prepare_track`/`commit`（临时测试，已删除） | 两次均提交成功；`verify` 报 `duplicate_path` | A-04 |
+| R-12 | 公共 API 以同一 `FileId` 两次调用 `prune([id,id])` | 修复后去重并正常完成；修复前 debug 下溢 panic | A-05 |
+| R-13 | 公共 API 对同一路径两次 `prepare_track`/`commit` | 修复后第二次 `AlreadyManaged`，只有一份清单；修复前两份 | A-04 |
 | R-14 | `.pending` 版本大于清单头，执行 `verify --fix` | 退出 0，报告 `pending_stale [fixed]`，`.pending` 被删除 | A-02 |
 
 ## 6. 新发现详述
@@ -375,13 +375,13 @@ $$\mathrm{projected}(S)=\{\,f\mid D(f)=\mathrm{content}(\mathrm{head}(M(f)))\,\}
 
 ### 6.2 P2
 
-**A-03 写回没有 pending 的分支。** `Store::committed(id, ver)` 对任意已存在版本返回 `Committed`，`Committed::apply` 直接调用 `write_target`，不经过 `begin_apply`（`crates/bakon-core/src/store/mod.rs:127-138, 261-274`）。CLI 在 `revert` 的“目标内容等于 head”分支使用它（`crates/bakon-cli/src/commands.rs:171-176`）：若目标已是普通文件，`write_existing` 先 `O_TRUNC` 再写；磁盘满或 I/O 错误发生在截断之后时，目标留下部分内容，而 `.pending` 不存在，恢复流程没有依据。形式陈述：存在转移 $S\to S'$，其中 $D$ 被部分写入、$P(S')=\emptyset$，且 $M$ 的 pending 为空；这违反 $\mathbf{P_4}$。修复：若当前内容已等于 head，直接返回 no-op；仅在目标缺失时创建；任何实际写回都先写 `.pending`。同时把 `Store::committed` 收紧为 `pub(crate)` 或要求写回令牌。
+**A-03 写回没有 pending 的分支。** `Store::committed(id, ver)` 对任意已存在版本返回 `Committed`，`Committed::apply` 直接调用 `write_target`，不经过 `begin_apply`（`crates/bakon-core/src/store/mod.rs:127-138, 261-274`）。CLI 在 `revert` 的“目标内容等于 head”分支使用它（`crates/bakon-cli/src/commands.rs:171-176`）：若目标已是普通文件，`write_existing` 先 `O_TRUNC` 再写；磁盘满或 I/O 错误发生在截断之后时，目标留下部分内容，而 `.pending` 不存在，恢复流程没有依据。形式陈述：存在转移 $S\to S'$，其中 $D$ 被部分写入、$P(S')=\emptyset$，且 $M$ 的 pending 为空；这违反 $\mathbf{P_4}$。已修复：目标已存在时直接 no-op，不再截断重写；只有目标缺失时才创建。`Store::committed` 仍公开，旧版本写回面留给 A-09 收紧。
 
-**A-04 公共提交不检查路径唯一。** `prepare_track` 生成新 `FileId`，`commit` 只比较 head 并写清单，不检查 $M$ 中是否已有相同 `path.key()`（`crates/bakon-core/src/store/mod.rs:281-296, 323-387`）。CLI 通过 `resolve` 规避，但核心库公开 API 可以直接产生两份同路径清单，违反 $\mathbf{S_1}$/$\mathbf{P_9}$。后果是 `resolve` 返回其中一份、`ls` 静默折叠、后续 `edit` 可能更新非预期历史；`verify` 只能报告 `duplicate_path`，不能自动修复。修复：在 `commit` 的 track 分支（`expected_head == None`）检查路径键唯一；或在 `prepare_track` 要求调用方先证明 `resolve(path) == None`，并把写锁作为参数。
+**A-04 公共提交不检查路径唯一。** `prepare_track` 生成新 `FileId`，`commit` 只比较 head 并写清单，不检查 $M$ 中是否已有相同 `path.key()`（`crates/bakon-core/src/store/mod.rs:281-296, 323-387`）。CLI 通过 `resolve` 规避，但核心库公开 API 可以直接产生两份同路径清单，违反 $\mathbf{S_1}$/$\mathbf{P_9}$。后果是 `resolve` 返回其中一份、`ls` 静默折叠、后续 `edit` 可能更新非预期历史；`verify` 只能报告 `duplicate_path`，不能自动修复。已修复：`commit` 的 track 分支（`expected_head == None`）先调用 `resolve`，路径已被任何清单占用时返回 `AlreadyManaged`（4），不再写入第二份清单。
 
-**A-05 `prune` 重复 id 下溢。** `prune` 用 `BTreeSet` 去重选择，但随后 `for id in ids` 遍历原始切片（`crates/bakon-core/src/store/mod.rs:534-570`，下溢在 `:556-557`）。重复 id 的第二次迭代会对同一批 removed 记录再次执行 `*count -= 1`；当计数已为 0 时 debug 下溢 panic，release 下回绕为极大值，报告与候选集合均不可信。公共 API 的签名 `&[FileId]` 不排除重复。修复：入口 `let ids: Vec<FileId> = ids.iter().copied().collect::<BTreeSet<_>>().into_iter().collect();`，计数使用 `checked_sub`，并把 `expect` 改为 `Corrupt`/`Internal` 错误。
+**A-05 `prune` 重复 id 下溢。** `prune` 用 `BTreeSet` 去重选择，但随后 `for id in ids` 遍历原始切片（`crates/bakon-core/src/store/mod.rs:534-570`，下溢在 `:556-557`）。重复 id 的第二次迭代会对同一批 removed 记录再次执行 `*count -= 1`；当计数已为 0 时 debug 下溢 panic，release 下回绕为极大值，报告与候选集合均不可信。公共 API 的签名 `&[FileId]` 不排除重复。已修复：入口先把 `ids` 转成 `BTreeSet` 再遍历，计数使用 `checked_sub`，缺失计数与下溢返回 `Internal`，不再 panic 或回绕。
 
-**A-06 `Store::open` 自动创建存储。** `open` 直接调用 `init`；`init` 在路径不存在时创建目录、标记与布局（`crates/bakon-core/src/store/mod.rs:143-187`；CLI 在 `crates/bakon-cli/src/commands.rs:971-979` 调用）。`verify`、`log`、`ls` 等读命令都先 `open`，因此 `bakon --store /typo verify` 会创建一个空存储并返回 0；`log` 随后会返回 3（未纳管），但创建副作用已经发生。API §3 把 `Store::open` 的失败定义为 6（未初始化），而 OPS §1 又说“不存在则创建”；两条契约冲突。修复：拆成 `open`（要求标记，缺失返回 6）与 `init`（显式创建）；`edit` 可以在用户明确要求时自动初始化空目录；`verify` 不应有创建副作用。
+**A-06 `Store::open` 自动创建存储。** `open` 直接调用 `init`；`init` 在路径不存在时创建目录、标记与布局（`crates/bakon-core/src/store/mod.rs:143-187`；CLI 在 `crates/bakon-cli/src/commands.rs:971-979` 调用）。`verify`、`log`、`ls` 等读命令都先 `open`，因此 `bakon --store /typo verify` 会创建一个空存储并返回 0；`log` 随后会返回 3（未纳管），但创建副作用已经发生。API §3 把 `Store::open` 的失败定义为 6（未初始化），而 OPS §1 又说“不存在则创建”；两条契约冲突。已修复：`Store::open` 只接受已有标记，缺失、空目录或无标记都返回 6 且不创建；`init` 命令与首次 `edit` 使用 `Store::init` 的创建语义，其他读/写命令使用 `open`。上述 R-04 现在退出 6 且路径不存在。
 
 **A-07 `..` 的词法折叠。** `reject_symlinked_parent_traversal` 只在 `..` 前的组件是符号链接或规范路径不一致时拒绝（`crates/bakon-core/src/types.rs:97-144`）；如果前缀是普通文件，`fs::canonicalize` 等于自身，检查通过，随后 `clean` 弹出该文件组件。于是 `d/blocker/../victim` 被当作 `d/victim`，而内核会因 `blocker` 不是目录返回 ENOTDIR。缺失前缀同理。修复：对用户输入直接拒绝任何 `..`（最简单且与文档“规范化绝对路径”一致），或用 `openat`/`realpath` 保留内核语义。仅靠符号链接检查不足以建立路径身份。
 
@@ -480,9 +480,9 @@ A-07 说明 `AbsPath` 的等价关系不是内核等价关系：词法折叠把�
 - `cargo test --workspace --all-targets`：120 个测试通过（core 57、regressions 13、cli 集成 36、cli 单元 7、crash 6、concurrency 1）。
 - `cargo clippy --workspace --all-targets -- -D warnings`：通过。
 - `cargo fmt --all --check`：通过。
-- R-01 至 R-11 与 R-14 使用真实二进制与隔离存储复现；R-12/R-13 使用临时集成测试复现后删除，未留在仓库。
+- R-01 至 R-11 与 R-14 使用真实二进制与隔离存储复现；R-12/R-13 已转为 `store` 单元回归用例。
 - 0600 文件的对象权限、只读存储、损坏清单、`u32::MAX` 清单、`.pending` 缺失清单均按第 5 节观测。
-- A-20 的退出码 9 实现后测试总数为 123；A-01/A-02 修复后为 130；本节的 120 是审计时基线。
+- A-20 的退出码 9 实现后测试总数为 123；A-01 至 A-06 修复后为 136；本节的 120 是审计时基线。
 
 ### 9.2 未覆盖
 
