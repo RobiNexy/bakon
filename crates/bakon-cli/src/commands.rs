@@ -95,10 +95,7 @@ pub fn edit(cli: &Cli, file: &Path, editor: Option<&str>) -> Result<u8> {
     let (committed, hook_manifest) = {
         let guard = store.begin_write(timeout)?;
         if store.resolve(&path)? != Some(id) {
-            return Err(Error::Internal(format!(
-                "{} was re-tracked while the editor was open",
-                path
-            )));
+            return Err(Error::PathChanged(path));
         }
         let prepared = store.prepare_commit(&guard, id, &edited, Source::Edit)?;
         let committed = store.commit(&guard, prepared, Some(head))?;
@@ -133,7 +130,7 @@ pub fn revert(cli: &Cli, file: &Path, version: u32, force: bool) -> Result<u8> {
             .ok_or(Error::NotManaged(path.clone()))?;
         let manifest = store.manifest(id)?;
         let target = find_version(&manifest, ver)?.clone();
-        let target_content = store.content(target.blob)?;
+        let target_content = store.content_for(&target)?;
 
         let head = manifest.head().cloned().ok_or_else(|| Error::Corrupt {
             what: "manifest",
@@ -193,12 +190,14 @@ pub fn revert(cli: &Cli, file: &Path, version: u32, force: bool) -> Result<u8> {
             store.begin_apply(&guard, id, pending_version, old_blob, new_blob)?;
             let committed = store.commit(&guard, prepared, Some(head.ver))?;
             warn_trim(&committed);
+            let committed_record = committed.clone();
+            let applied_version = committed.version();
             committed
                 .apply(&guard, &store, &path)
-                .map_err(|error| applied(error, committed.version()))?;
-            store.finish_apply(&guard, id)?;
+                .map_err(|error| applied(error, applied_version))?;
+            store.finish_apply(&guard, id, committed_record.version())?;
             let manifest = store.manifest(id)?;
-            (Some(committed), manifest, previous)
+            (Some(committed_record), manifest, previous)
         }
     };
 
@@ -717,11 +716,9 @@ pub fn show(cli: &Cli, file: &Path, version: u32) -> Result<u8> {
     let id = store.resolve(&path)?.ok_or(Error::NotManaged(path))?;
     let manifest = store.manifest(id)?;
     let record = find_version(&manifest, Ver::parse(version)?)?;
-    let content = store.content(record.blob)?;
+    let content = store.content_for(record)?;
 
-    let mut stdout = io::stdout().lock();
-    stdout.write_all(&content).map_err(Error::Io)?;
-    stdout.flush().map_err(Error::Io)?;
+    write_stdout(&content)?;
     Ok(0)
 }
 
@@ -755,8 +752,8 @@ pub fn diff(cli: &Cli, file: &Path, first: Option<u32>, second: Option<u32>) -> 
 
     let older_record = find_version(&manifest, older)?;
     let newer_record = find_version(&manifest, newer)?;
-    let older_bytes = store.content(older_record.blob)?;
-    let newer_bytes = store.content(newer_record.blob)?;
+    let older_bytes = store.content_for(older_record)?;
+    let newer_bytes = store.content_for(newer_record)?;
 
     if older_bytes == newer_bytes {
         return Ok(0);
@@ -777,9 +774,7 @@ pub fn diff(cli: &Cli, file: &Path, first: Option<u32>, second: Option<u32>) -> 
         .header(&header_older, &header_newer)
         .to_string();
 
-    let mut stdout = io::stdout().lock();
-    stdout.write_all(text.as_bytes()).map_err(Error::Io)?;
-    stdout.flush().map_err(Error::Io)?;
+    write_stdout(text.as_bytes())?;
     Ok(1)
 }
 
@@ -874,11 +869,20 @@ fn read_if_exists(path: &AbsPath) -> Result<Option<Vec<u8>>> {
 }
 
 fn warn_trim(committed: &Committed) {
-    if committed.trim_failed() {
-        eprintln!(
-            "bakon: saved version {}, but old objects could not be reclaimed; run `bakon verify --fix`",
-            committed.version()
-        );
+    let Some(failure) = committed.trim_failure() else {
+        return;
+    };
+    match failure.hash {
+        Some(hash) => eprintln!(
+            "bakon: saved version {}, but old object {hash} could not be reclaimed: {}; run `bakon verify --fix`",
+            committed.version(),
+            failure.detail
+        ),
+        None => eprintln!(
+            "bakon: saved version {}, but old objects could not be reclaimed: {}; run `bakon verify --fix`",
+            committed.version(),
+            failure.detail
+        ),
     }
 }
 
@@ -1088,10 +1092,23 @@ fn lock_timeout(cli: &Cli) -> Duration {
     Duration::from_millis(cli.lock_timeout)
 }
 
-/// stdout 只放数据；写入失败视为 I/O 错误而不是 panic。
+/// stdout 只放数据；broken pipe 视为下游主动关闭，不当作 bakon 的 I/O 失败。
+fn write_stdout(bytes: &[u8]) -> Result<()> {
+    let mut stdout = io::stdout().lock();
+    match stdout.write_all(bytes).and_then(|()| stdout.flush()) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+        Err(error) => Err(Error::Io(error)),
+    }
+}
+
 fn emit(line: &str) -> Result<()> {
     let mut stdout = io::stdout().lock();
-    writeln!(stdout, "{line}").map_err(Error::Io)
+    match writeln!(stdout, "{line}").and_then(|()| stdout.flush()) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+        Err(error) => Err(Error::Io(error)),
+    }
 }
 
 #[cfg(test)]

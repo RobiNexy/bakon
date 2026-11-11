@@ -279,6 +279,30 @@ fn edit_accepts_an_editor_flag() {
 }
 
 #[test]
+fn moving_the_path_during_edit_is_a_conflict() {
+    let fixture = Fixture::new(b"first");
+    let moved = fixture.temp().join("moved.txt");
+    let script = format!(
+        "'{}' --store '{}' mv '{}' '{}' >/dev/null\nprintf 'second' > \"$1\"",
+        env!("CARGO_BIN_EXE_bakon"),
+        fixture.store(),
+        fixture.file(),
+        moved.display()
+    );
+    let editor = editor_script_named(fixture.temp(), "move-during-edit.sh", &script);
+
+    let output = fixture.edit(&editor);
+
+    assert_eq!(output.status.code(), Some(4), "stderr: {}", stderr(&output));
+    assert!(
+        stderr(&output).contains("moved or re-tracked"),
+        "stderr: {}",
+        stderr(&output)
+    );
+    assert_eq!(fs::read(fixture.file()).unwrap(), b"second");
+}
+
+#[test]
 fn edit_without_changes_creates_no_version() {
     let fixture = Fixture::new(b"unchanged");
     let editor = editor_script(Path::new(fixture.store()).parent().unwrap(), "exit 0");
@@ -313,6 +337,22 @@ fn diff_exits_one_on_text_changes() {
 }
 
 #[test]
+fn single_argument_diff_compares_with_the_previous_version() {
+    let fixture = Fixture::new(b"alpha\n");
+    let editor = editor_script(fixture.temp(), "printf 'beta\\n' > \"$1\"");
+    assert_eq!(fixture.edit(&editor).status.code(), Some(0));
+
+    let output = fixture.run(&["diff", fixture.file(), "1"]);
+
+    assert_eq!(output.status.code(), Some(1), "stderr: {}", stderr(&output));
+    let text = stdout(&output);
+    assert!(text.contains("v0"), "{text}");
+    assert!(text.contains("v1"), "{text}");
+    assert!(text.contains("-alpha"), "{text}");
+    assert!(text.contains("+beta"), "{text}");
+}
+
+#[test]
 fn diff_with_identical_content_exits_zero() {
     let fixture = Fixture::new(b"same\n");
     let editor = editor_script(Path::new(fixture.store()).parent().unwrap(), "exit 0");
@@ -338,6 +378,38 @@ fn diff_reports_binary_files_without_printing_bytes() {
     assert_eq!(output.status.code(), Some(1), "stderr: {}", stderr(&output));
     assert!(stderr(&output).contains("binary files differ"));
     assert!(stdout(&output).is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn show_ignores_a_closed_pipe() {
+    use std::io::Read;
+    use std::process::Stdio;
+
+    let content = vec![b'x'; 1024 * 1024];
+    let fixture = Fixture::new(&content);
+    let noop = editor_script(fixture.temp(), "exit 0");
+    assert_eq!(fixture.edit(&noop).status.code(), Some(0));
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_bakon"))
+        .env_remove("BAKON_STORE")
+        .env_remove("BAKON_HOME")
+        .env_remove("VISUAL")
+        .env(
+            "BAKON_CONFIG",
+            std::env::temp_dir().join("bakon-tests-no-config.toml"),
+        )
+        .args(["--store", fixture.store(), "show", fixture.file(), "0"])
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+    let mut byte = [0_u8; 1];
+    stdout.read_exact(&mut byte).unwrap();
+    drop(stdout);
+
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(0));
 }
 
 #[test]

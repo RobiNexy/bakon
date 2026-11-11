@@ -10,6 +10,4 @@
 - P1 v1 M3 剩余：Windows 钩子与并发用例（[[MODULE__bakon-v1-design]] §10）
 - P2 v1 发布：演练一次 Release 回滚（[[AGENT__procedure__change-path]]）
 - P2 v1 复审残余：Windows/macOS 的大小写路径键未在真实 runner 上验证（[[design-audit-v1-2026-11-10-recheck]]）
-- P2 v1 复审残余：实际裁剪仍需全局引用扫描，若要 $O(k)$ 需持久化引用计数（[[design-audit-v1-2026-11-10-recheck]]）
-- P2 决定是否为旧存储提供 feature-gated 迁移工具（`legacy-git`）
-- P3 v1 全量审计残余：A-13 至 A-19 与 O-01 至 O-13 见 [[design-audit-v1-2026-11-11]] §6
+- P3 v1 全量审计残余：O-10 Windows `shell_quote`/`%VAR%` 未在 runner 验证（[[design-audit-v1-2026-11-11]] §6.4；Ubuntu 无法验证）

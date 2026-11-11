@@ -111,6 +111,16 @@ impl Manifest {
                 detail: format!("{} has no versions", self.id),
             });
         }
+        if self.max_ver().is_some_and(|head| head.get() == u32::MAX) {
+            return Err(Error::Corrupt {
+                what: "manifest",
+                detail: format!(
+                    "{} has version {} and cannot allocate a successor",
+                    self.id,
+                    u32::MAX
+                ),
+            });
+        }
         for pair in self.versions.windows(2) {
             if pair[0].ver >= pair[1].ver {
                 return Err(Error::Corrupt {
@@ -131,8 +141,9 @@ impl Manifest {
                 });
             }
         }
+        let mut pending = 0;
         for record in &self.versions {
-            if OffsetDateTime::parse(&record.time, &Rfc3339).is_err() {
+            let Ok(timestamp) = OffsetDateTime::parse(&record.time, &Rfc3339) else {
                 return Err(Error::Corrupt {
                     what: "manifest",
                     detail: format!(
@@ -140,7 +151,34 @@ impl Manifest {
                         self.id, record.ver, record.time
                     ),
                 });
+            };
+            if timestamp.offset() != time::UtcOffset::UTC {
+                return Err(Error::Corrupt {
+                    what: "manifest",
+                    detail: format!(
+                        "{} version {} timestamp is not UTC: {}",
+                        self.id, record.ver, record.time
+                    ),
+                });
             }
+            if record.pending_apply {
+                pending += 1;
+                if record.source != Source::Revert {
+                    return Err(Error::Corrupt {
+                        what: "manifest",
+                        detail: format!(
+                            "{} version {} is pending but has source {:?}",
+                            self.id, record.ver, record.source
+                        ),
+                    });
+                }
+            }
+        }
+        if pending > 1 {
+            return Err(Error::Corrupt {
+                what: "manifest",
+                detail: format!("{} has {pending} pending versions", self.id),
+            });
         }
         Ok(())
     }
@@ -332,6 +370,39 @@ mod tests {
         manifest.versions[1].ver = Ver::new(2).unwrap();
         let error = manifest.validate().unwrap_err();
         assert!(matches!(error, Error::Corrupt { .. }));
+    }
+
+    #[test]
+    fn exhausted_version_numbers_are_corruption() {
+        let manifest = manifest_with(&[u32::MAX]);
+        let error = manifest.validate().unwrap_err();
+        assert!(matches!(error, Error::Corrupt { .. }));
+    }
+
+    #[test]
+    fn non_utc_timestamps_are_corruption() {
+        let mut manifest = manifest_with(&[0]);
+        manifest.versions[0].time = "2026-11-10T12:00:00+08:00".into();
+
+        let error = manifest.validate().unwrap_err();
+        assert!(matches!(error, Error::Corrupt { .. }));
+    }
+
+    #[test]
+    fn pending_apply_requires_a_revert_and_at_most_one_record() {
+        let mut manifest = manifest_with(&[0, 1, 2]);
+        manifest.versions[1].pending_apply = true;
+        assert!(matches!(manifest.validate(), Err(Error::Corrupt { .. })));
+
+        manifest.versions[1].source = Source::Revert;
+        assert!(
+            manifest.validate().is_ok(),
+            "recovery may briefly leave a historical pending revert"
+        );
+
+        manifest.versions[2].pending_apply = true;
+        manifest.versions[2].source = Source::Revert;
+        assert!(matches!(manifest.validate(), Err(Error::Corrupt { .. })));
     }
 
     #[test]

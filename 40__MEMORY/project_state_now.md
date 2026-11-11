@@ -15,7 +15,8 @@
 - A-07/A-08/A-09 已修复：`AbsPath::new` 拒绝任何 `..`（退出 2），`join` 收紧为 `pub(crate)`；Unix 新建目录为 `0700`、新建文件为 `0600`；锁拆为 `ReadLock`/`WriteLock`，所有写接口要求 `&WriteLock`，并有一个 `compile_fail,E0308` 文档用例。
 - A-11 已修复：`verify` 只用成功解析的清单构造引用集；损坏清单只形成报告项，不再中断。存在损坏清单时报告 `orphan_scan`，`--fix` 跳过孤儿回收与索引修复，避免删除仍可能被引用的对象。
 - A-12 已修复：`hook set/unset` 与 `config init` 支持 human/plain/json；`--no-hook` 提升为全局参数，子命令前后均可使用；API 文档删除未实现的 `--no-color`。
-- A-20 已按 [[ADR__exit-9-when-durability-uncertain]] 实现：清单 `rename` 为提交点，父目录 `fsync` 失败返回退出码 9；`edit` 的可见版本、`revert` 的 `.pending` 保留与后续恢复有故障注入用例；对象、`.pending`、索引与标记的写入仍严格返回 8；当前测试总数 142，另有 1 个 `compile_fail` 文档用例。
+- P3 已在 Ubuntu 可验证范围内收敛：A-13 至 A-19、O-01 至 O-09、O-11 至 O-13 已修复或按诊断契约修正文档；只读锁、版本上界、临时文件清理、损坏对象、apply 标记、恢复退出码、broken pipe、配置原子写入与索引重写均有回归用例。O-10 与 Windows 相关项保留。
+- A-20 已按 [[ADR__exit-9-when-durability-uncertain]] 实现：清单 `rename` 为提交点，父目录 `fsync` 失败返回退出码 9；`edit` 的可见版本、`revert` 的 `.pending` 保留与后续恢复有故障注入用例；对象、`.pending`、索引与标记的写入仍严格返回 8；当前测试总数 159，另有 1 个 `compile_fail` 文档用例。
 
 ## Known limitations
 
@@ -23,8 +24,7 @@
 - 7 个交叉编译目标的工具链尚未验证；本机只有宿主默认目标 `x86_64-unknown-linux-gnu`（Rust stable 1.99.1 已装，`~/.cargo/bin` 在 PATH）。
 - 旧存储迁移不在 v1.0 范围；旧 `repo/` 不被读取也不被删除。
 - `edit` 通过 `sh -c` 启动编辑器，Windows 语义属 M3。
-- 复审剩余：`commit`/`prune`/`rename` 的写锁仍是调用点约定；Windows/macOS 大小写路径键未在 runner 验证；实际裁剪仍需全局引用扫描。`..` 路径、类型化写回、`codec` 分派与 CLI 命令已修复。
-- 全量审计新增限制：只读存储因 `.lock` 以读写方式打开而无法读取；Windows 全量测试未跑通（测试夹具依赖 `sh` 与 `/tmp` 断言）；初始化标记临时文件只忽略不删除，根目录临时文件仍无自动清理（A-15）。
+- 复审剩余：Windows/macOS 大小写路径键未在 runner 验证；实际裁剪仍需全局引用扫描；Windows 全量测试未跑通（测试夹具依赖 `sh` 与 `/tmp` 断言）；初始化标记临时文件只忽略不删除，但 `verify --fix` 会清理严格命名的原子写临时文件；O-10 的 Windows shell 引号未验证。
 - 人工验收流程见 [[OPS__manual-testing]]；`README.md`/`README.en.md` 只保留介绍与使用说明。仓库与本地目录已改为小写 `bakon`，`v1.0.1` 已打 tag 并完成 Release；`edit --editor` 与详细使用说明已包含在发布中。
 - 端到端 1 MB 文本提交实测约 50 ms（本机 ext4/NVMe），验收预算已调整为 60 ms；成本主要是进程启动、编辑器与 fsync。
 

@@ -6,6 +6,7 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::io::{Read, Write};
+use std::path::Path;
 
 use flate2::Compression;
 use flate2::read::DeflateDecoder;
@@ -39,7 +40,13 @@ impl ObjectStore {
         let hash = hash_bytes(plain);
         let path = self.path(hash);
         if path.as_path().exists() {
-            return Ok(hash);
+            match self.get(hash) {
+                Ok(_) => return Ok(hash),
+                Err(Error::Corrupt { .. }) => {
+                    // 既有对象已损坏；本次写入会用同一地址覆盖它。
+                }
+                Err(error) => return Err(error),
+            }
         }
 
         let compressed = deflate(plain)?;
@@ -123,6 +130,54 @@ impl ObjectStore {
         Ok(hashes)
     }
 
+    /// 列出对象目录中不符合“两层分片 + 合法哈希 + 普通文件”的条目。
+    pub fn invalid_entries(&self) -> Result<Vec<AbsPath>> {
+        let mut invalid = Vec::new();
+        let shards = match fs::read_dir(self.root.as_path()) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(invalid),
+            Err(error) => return Err(Error::Io(error)),
+        };
+        for shard in shards {
+            let shard = shard.map_err(Error::Io)?;
+            let shard_name = shard.file_name();
+            let Some(shard_text) = shard_name.to_str() else {
+                invalid.push(self.root.join(&shard_name));
+                continue;
+            };
+            let shard_is_dir = shard.file_type().map_err(Error::Io)?.is_dir();
+            if shard_text == "tmp" {
+                if !shard_is_dir {
+                    invalid.push(self.root.join(&shard_name));
+                }
+                continue;
+            }
+            let valid_shard = shard_text.len() == 2
+                && shard_text
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+                && shard_is_dir;
+            if !valid_shard {
+                invalid.push(self.root.join(&shard_name));
+                continue;
+            }
+            for entry in fs::read_dir(shard.path()).map_err(Error::Io)? {
+                let entry = entry.map_err(Error::Io)?;
+                let name = entry.file_name();
+                let Some(name_text) = name.to_str() else {
+                    invalid.push(self.root.join(Path::new(shard_text).join(&name)));
+                    continue;
+                };
+                let valid = BlobHash::from_hex(&format!("{shard_text}{name_text}")).is_some()
+                    && entry.file_type().map_err(Error::Io)?.is_file();
+                if !valid {
+                    invalid.push(self.root.join(format!("{shard_text}/{name_text}")));
+                }
+            }
+        }
+        Ok(invalid)
+    }
+
     /// 清空写入暂存区；只能在持排他锁时调用。
     pub fn cleanup_tmp(&self) -> Result<()> {
         remove_dir_contents(self.temporary.as_path())
@@ -187,6 +242,17 @@ mod tests {
     }
 
     #[test]
+    fn put_repairs_a_corrupt_existing_object() {
+        let (_temporary, objects) = store();
+        let hash = objects.put(b"repair me").unwrap();
+        let path = objects.path(hash);
+        fs::write(path.as_path(), b"garbage").unwrap();
+
+        assert_eq!(objects.put(b"repair me").unwrap(), hash);
+        assert_eq!(objects.get(hash).unwrap(), b"repair me");
+    }
+
+    #[test]
     fn different_content_gets_different_hashes() {
         let (_temporary, objects) = store();
         assert_ne!(objects.put(b"one").unwrap(), objects.put(b"two").unwrap());
@@ -222,6 +288,22 @@ mod tests {
         fs::write(path.as_path(), bytes).unwrap();
 
         assert!(matches!(objects.get(hash), Err(Error::Corrupt { .. })));
+    }
+
+    #[test]
+    fn invalid_entries_reports_unknown_names_without_removing_them() {
+        let (_temporary, objects) = store();
+        objects.put(b"good").unwrap();
+        fs::create_dir_all(objects.root.join("zz")).unwrap();
+        fs::write(objects.root.join("zz/junk"), b"x").unwrap();
+        fs::create_dir_all(objects.root.join("aa")).unwrap();
+        fs::write(objects.root.join("aa/nothex"), b"x").unwrap();
+
+        let invalid = objects.invalid_entries().unwrap();
+
+        assert_eq!(invalid.len(), 2, "{invalid:?}");
+        assert!(objects.root.join("zz/junk").as_path().exists());
+        assert!(objects.root.join("aa/nothex").as_path().exists());
     }
 
     #[test]

@@ -3,14 +3,17 @@
 //! 配置文件是 TOML；缺失时全部取默认值，解析失败按用法错误退出（2）。
 
 use std::env;
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use bakon_core::manifest::DEFAULT_MAX_VERSIONS;
 use bakon_core::{Error, Result};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub store: Option<String>,
@@ -21,6 +24,7 @@ pub struct Config {
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Retention {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_versions: Option<u32>,
@@ -75,14 +79,49 @@ pub fn load(path: &Path) -> Result<Config> {
 }
 
 /// 写入默认配置；已存在则保持不变并返回 `false`。
+///
+/// 先写同目录临时文件并 fsync，再 rename，避免崩溃留下半截配置。
 pub fn init(path: &Path) -> Result<bool> {
     if path.exists() {
         return Ok(false);
     }
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(Error::Io)?;
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent).map_err(Error::Io)?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "config.toml".into());
+    let temporary = parent.join(format!(".{name}.{}.{nonce}.tmp", std::process::id()));
+
+    let result = (|| -> Result<()> {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temporary).map_err(Error::Io)?;
+        file.write_all(TEMPLATE.as_bytes()).map_err(Error::Io)?;
+        file.sync_all().map_err(Error::Io)?;
+        drop(file);
+        fs::rename(&temporary, path).map_err(Error::Io)?;
+        #[cfg(unix)]
+        {
+            fs::File::open(parent)
+                .and_then(|directory| directory.sync_all())
+                .map_err(Error::Io)?;
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
     }
-    fs::write(path, TEMPLATE).map_err(Error::Io)?;
+    result?;
     Ok(true)
 }
 
@@ -124,6 +163,20 @@ mod tests {
 
         let config = load(&path).unwrap();
         assert_eq!(config.max_versions(), 100);
+        let entries: Vec<_> = fs::read_dir(temporary.path()).unwrap().collect();
+        assert_eq!(entries.len(), 1, "init must not leave a temporary file");
+    }
+
+    #[test]
+    fn unknown_config_fields_are_rejected() {
+        let temporary = TempDir::new().unwrap();
+        let path = temporary.path().join("config.toml");
+        fs::write(&path, "surprise = true\n").unwrap();
+
+        let error = load(&path).unwrap_err();
+
+        assert!(matches!(error, Error::Usage(_)));
+        assert_eq!(error.exit_code(), 2);
     }
 
     #[test]

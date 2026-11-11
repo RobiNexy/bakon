@@ -35,6 +35,8 @@
 | `versions[].source` | 是 | `baseline` / `edit` / `revert` |
 | `versions[].pending_apply` | 否 | 仅 `revert` 用；`true` 表示目标文件尚未写回 |
 
+时间必须是合法 UTC；不要求严格递增，因为系统墙钟可能回拨，版本顺序只由 `ver` 决定。`pending_apply` 只允许出现在 `source = revert` 的头版本上。
+
 `index.json` 是派生缓存：`{ "schema": 1, "entries": { "<abs path>": "<id>" } }`。它的唯一作用是让路径查找不必扫描全部清单。
 
 ## 2. 权威性

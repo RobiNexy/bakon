@@ -76,13 +76,13 @@ $$\mathrm{projected}(S)=\{\,f\mid D(f)=\mathrm{content}(\mathrm{head}(M(f)))\,\}
 | A-10 | 测试套件依赖 `sh`、可执行脚本与 `/tmp` 断言；Windows 全量测试不可用 | P2 | 跨平台质量门 |
 | A-11 | 一份损坏清单使 `verify` 在孤儿扫描处整体失败，已收集的报告项丢失 | P2（已修复） | $\mathbf{P_3}$ |
 | A-12 | `hook set/unset`、`config init` 忽略 `--format json`；全局 `--no-hook`/`--no-color` 未实现 | P2（已修复） | $\mathbf{P_8}$ |
-| A-13 | 只读存储无法读取：共享锁仍以读写方式打开 `.lock` | P3 | $\mathbf{P_8}$ |
-| A-14 | 清单头为 `u32::MAX` 时 `verify` 接受，下一次提交返回内部错误 70 | P3 | $\mathbf{P_3}$ |
-| A-15 | `files/`、根目录中的清单/索引/pending 临时文件没有清理路径 | P3 | $\mathbf{P_1},\mathbf{P_{12}}$ |
-| A-16 | `.lock` 只记录 PID，未记录设计承诺的开始时间；写入截断非原子 | P3 | 诊断契约 |
-| A-17 | `diff` 单参数帮助文本与实际方向相反 | P3 | $\mathbf{P_8}$ |
-| A-18 | `revert`/`show`/`diff` 绕过 `content_for`，未来 codec 会解码错误 | P3 | 设计一致性 |
-| A-19 | `Committed::trim_failed` 只有布尔，丢失对象哈希与失败原因 | P3 | 诊断契约 |
+| A-13 | 只读存储无法读取：共享锁仍以读写方式打开 `.lock` | P3（已修复） | $\mathbf{P_8}$ |
+| A-14 | 清单头为 `u32::MAX` 时 `verify` 接受，下一次提交返回内部错误 70 | P3（已修复） | $\mathbf{P_3}$ |
+| A-15 | `files/`、根目录中的清单/索引/pending 临时文件没有清理路径 | P3（已修复） | $\mathbf{P_1},\mathbf{P_{12}}$ |
+| A-16 | `.lock` 只记录 PID，未记录设计承诺的开始时间；写入截断非原子 | P3（已按诊断契约修正文档） | 诊断契约 |
+| A-17 | `diff` 单参数帮助文本与实际方向相反 | P3（已修复） | $\mathbf{P_8}$ |
+| A-18 | `revert`/`show`/`diff` 绕过 `content_for`，未来 codec 会解码错误 | P3（已修复） | 设计一致性 |
+| A-19 | `Committed::trim_failed` 只有布尔，丢失对象哈希与失败原因 | P3（已修复） | 诊断契约 |
 | A-20 | 目录 `fsync` 失败发生在 `rename` 之后时，命令报告失败但提交可能已可见 | P2（已裁决：退出 9） | $\mathbf{P_3}$ |
 
 次要观察 O-01 至 O-13 列于第 6.4 节，不再单独占用主表。
@@ -155,10 +155,10 @@ $$\mathrm{projected}(S)=\{\,f\mid D(f)=\mathrm{content}(\mathrm{head}(M(f)))\,\}
 | 函数 | 契约 | 结论 |
 |---|---|---|
 | `ObjectStore::new` | 构造对象根 | 直接 |
-| `put` | 内容寻址写入，重复写入为 no-op | 基本成立；已存在路径不校验内容（O-04）；默认权限见 A-08 |
+| `put` | 内容寻址写入，重复写入为 no-op | 已修复 O-04：已存在路径先校验，损坏对象由本次写入覆盖修复；权限见 A-08 |
 | `get` | 读取、解压、哈希校验 | 正确；缺失/解压失败/哈希不符均为 `Corrupt` 6；不限制解压后大小 |
 | `path` | `objects/aa/<rest>` | 正确；哈希为小写十六进制 |
-| `list_hashes` | 扫描两层分片 | 忽略非法名称；不报告损坏/多余条目（O-05） |
+| `list_hashes` | 扫描两层分片 | 忽略非法名称；`invalid_entries` 单独报告，`verify` 输出 `invalid_object`（O-05 已修复） |
 | `cleanup_tmp` | 清空 `objects/tmp` | 正确；仅需写锁的约定未由类型承载 |
 | `hash_bytes` | SHA-256 | 正确 |
 | `deflate` | 确定性 deflate | 依赖 `flate2` 固定级别的确定性；未跨版本验证 |
@@ -204,8 +204,8 @@ $$\mathrm{projected}(S)=\{\,f\mid D(f)=\mathrm{content}(\mathrm{head}(M(f)))\,\}
 | `begin_write` | 排他锁并恢复，返回 `WriteLock` | 正确；恢复失败会释放锁 |
 | `begin_verify` | 排他锁但不自动恢复，返回 `WriteLock` | 供 `verify --fix` 先报告 `pending_stale` 再处理 `.pending` |
 | `lock_shared` | 共享锁，不恢复，返回 `ReadLock` | 正确；OPS 已改为“写命令启动时恢复”（O-11 已修正） |
-| `acquire_shared` / `acquire_exclusive` | 轮询、超时、写 holder | 基本正确；共享锁仍写打开 `.lock`，见 A-13 |
-| `write_holder` / `read_holder` | PID 诊断 | 截断重写非原子；无开始时间，见 A-16 |
+| `acquire_shared` / `acquire_exclusive` | 轮询、超时、写 holder | 已修复 A-13：共享锁以只读 fd 打开 `.lock`，缺文件时先创建再重开 |
+| `write_holder` / `read_holder` | PID 诊断 | 已按诊断契约修正 A-16：文档只承诺 PID，非原子写入仅影响提示 |
 | `ReadLock::drop` / `WriteLock::drop` | 解锁 | 正确；内核在进程崩溃时释放 |
 
 **读、解析与索引**
@@ -218,7 +218,7 @@ $$\mathrm{projected}(S)=\{\,f\mid D(f)=\mathrm{content}(\mathrm{head}(M(f)))\,\}
 | `committed` | 为已存在版本构造写回句柄 | 公共构造器扩大写回面，见 A-03/A-09 |
 | `head` / `all_ids` / `list_ids` | 查询 | 直接；`list_ids` 忽略非法文件名 |
 | `manifest_path` / `index_path` | 路径构造 | 直接 |
-| `index_cache` / `load_index` / `save_index` / `remember` | 派生缓存 | 读失败退化为空；写失败忽略；`rename` 后若 `remember` 提前返回，磁盘旧键可能保留（O-13） |
+| `index_cache` / `load_index` / `save_index` / `remember` | 派生缓存 | 读失败退化为空；写失败忽略；`rename` 现在总是重写磁盘索引（O-13 已修复） |
 
 **写、提交与改名**
 
@@ -251,9 +251,9 @@ $$\mathrm{projected}(S)=\{\,f\mid D(f)=\mathrm{content}(\mathrm{head}(M(f)))\,\}
 | `recover_entry` | 按 `entry.version` 匹配并校验 `new_blob` | 已修复：不再取最后一个 `pending_apply`；清单缺失、裁剪或不匹配时保留 `.pending` |
 | `append_revert_and_apply` | salvage 后追加 revert 并写回 | 崩溃在 `write_pending` 与 `commit` 之间会留下未提交条目；下一次按“清单头小于记录版本”判为 `pending_stale` |
 | `apply_pending` | 写回并把 Io/NotAFile 映射为 7 | 正确 |
-| `clear_pending_version` / `finish_apply` | 清版本标记与 `.pending` | 正确；`finish_apply` 只清头，不校验被应用版本（O-06） |
+| `clear_pending_version` / `finish_apply` | 清指定版本标记与 `.pending` | 已修复 O-06：`finish_apply` 要求版本存在且 `pending_apply = true`，按版本清除 |
 | `pending_path` / `read_pending` / `write_pending` / `clear_pending` | `.pending` 读写 | 严格 schema；空文件视为空；写为原子替换 |
-| `begin_apply` | 写 pending 记录 | 不校验版本/头，公共可误用（O-06） |
+| `begin_apply` | 写 pending 记录 | 已修复 O-06：要求版本为 head 后继、无其他 pending，且 `old_blob` 为 head 或缺失 |
 | `read_recovery_target` | 读取目标；缺失/非普通文件 | 正确；非普通文件错误未映射为 7（O-07） |
 
 ### 3.10 `crates/bakon-core/src/store/verify.rs`
@@ -292,7 +292,7 @@ $$\mathrm{projected}(S)=\{\,f\mid D(f)=\mathrm{content}(\mathrm{head}(M(f)))\,\}
 | `init` | 初始化并输出 | 正确；未持锁（O-12） |
 | `version` | 版本与目标 | 正确 |
 | `edit` | 纳管、编辑器、CAS 提交、钩子 | 主路径正确；编辑器后路径被改名/重纳管返回内部错误 70（O-02）；读到的编辑内容在恢复后未重读，但 `expected_head` CAS 会阻止已推进头的提交（本次未构造反例） |
-| `revert` | 分歧检查、salvage、pending、写回、钩子 | 主路径正确；“已匹配”且目标存在时 no-op（A-03 已修复）；读取目标版本用 `content` 而非 `content_for`，见 A-18；`finish_apply` 失败映射为 8/9（O-07 已修正） |
+| `revert` | 分歧检查、salvage、pending、写回、钩子 | 主路径正确；“已匹配”且目标存在时 no-op（A-03 已修复）；读取目标版本已用 `content_for`（A-18 已修复）；恢复目标非普通文件返回 7（O-07 已修复） |
 | `prune` | 共享/排他锁、单文件/全库、输出 | 正确；库层重复 id 已由 A-05 修复 |
 | `mv` | 改映射 | 正确；`rename` 的锁约定见 A-09 |
 | `hook` | show/set/unset | 语义正确；JSON 输出缺失，见 A-12 |
@@ -302,14 +302,14 @@ $$\mathrm{projected}(S)=\{\,f\mid D(f)=\mathrm{content}(\mathrm{head}(M(f)))\,\}
 | `ls` | 全部路径 | 正确；重复路径被 `BTreeMap` 静默折叠（A-04 的投影） |
 | `path` | 路径、id、清单路径 | 正确 |
 | `store` / `tree_size` | 根目录与占用 | 正确；符号链接不计入；递归深度未限制（次要） |
-| `show` / `diff` | 原始字节与统一 diff | 语义正确；`show`/`diff` 用 `content` 而非 `content_for`（A-18）；broken pipe 映射为 8（O-09） |
+| `show` / `diff` | 原始字节与统一 diff | 语义正确；已用 `content_for`（A-18 已修复）；broken pipe 视为下游关闭（O-09 已修复） |
 | `find_version` / `previous_version` | 版本查找与前一版 | 正确；`NoSuchVersion`/`Pruned` 区分清晰 |
 | `source_name` / `display_time` / `as_text` | 格式化与二进制判定 | 正确 |
 | `read_target` / `read_if_exists` | 目标读取 | 正确；非普通文件与悬空链接区分 |
 | `warn_trim` / `applied` | 裁剪警告与写回映射 | 正确；`trim_failed` 信息不足见 A-19 |
 | `run_hook` / `run_shell_with_env` | 锁外钩子 | 正确；`BAKON_HOOK` 防递归；不保证执行 |
 | `run_editor` / `run_shell` / `shell_quote` | 编辑器启动与引用 | Unix 正确；Windows `%` 展开与 `cmd` 引用未验证（O-10） |
-| `load_config` / `open_store` / `open_store_with` | 配置与打开 | 已拆分：首次 `edit` 用 `init`，其他命令用 `open`（A-06 已修复） |
+| `load_config` / `open_store` / `open_store_with` | 配置与打开 | 已拆分：首次 `edit` 用 `init`，其他命令用 `open`（A-06 已修复）；配置拒绝未知字段，写入原子化（O-08 已修复） |
 | `store_path` / `editor_command` / `home_dir` | 优先级 | 基本正确；Windows 仅用 `USERPROFILE` |
 | `lock_timeout` / `emit` | 超时与输出 | 正确；`emit` 的 broken pipe 见 O-09 |
 
@@ -356,7 +356,7 @@ $$\mathrm{projected}(S)=\{\,f\mid D(f)=\mathrm{content}(\mathrm{head}(M(f)))\,\}
 | R-05 | 目录中有普通文件 `blocker` 与 `victim`，执行 `edit <dir>/blocker/../victim` | 修复后退出 2 且不创建存储；修复前退出 0 并把 `<dir>/victim` 纳管 | A-07 |
 | R-06 | 纳管 0600 文件，检查对象权限 | 修复后对象、清单、锁与标记为 0600，新建目录为 0700；修复前随 `umask` 为 0664/0775 | A-08 |
 | R-07 | 将存储设为只读，执行 `log` | 退出 8，`I/O error: Permission denied` | A-13 |
-| R-08 | 把单版本清单的 `ver` 改为 `4294967295`，执行 `verify`，再执行 `edit` | `verify` 返回 0；`edit` 返回 70 “version number overflow” | A-14 |
+| R-08 | 把单版本清单的 `ver` 改为 `4294967295`，执行 `verify`，再执行 `edit` | 修复后 `verify` 返回 6 并报告损坏；修复前 `verify` 返回 0、`edit` 返回 70 | A-14 |
 | R-09 | 破坏一个清单后执行 `verify` 或 `verify --format json` | 修复后退出 6，保留 `manifest` 与 `orphan_scan` 等报告项；修复前只打印 `corrupt manifest` | A-11 |
 | R-10 | `--format json hook set <file> true`、`--format json config init` | 修复后输出 JSON；修复前输出人类文本 | A-12 |
 | R-11 | 跟踪 v0=one、v1=two、v2=three，执行 `diff <file> 1` | 比较 v0 与 v1，而帮助把第一个参数描述为 older | A-17 |
@@ -396,19 +396,19 @@ $$\mathrm{projected}(S)=\{\,f\mid D(f)=\mathrm{content}(\mathrm{head}(M(f)))\,\}
 
 ### 6.3 P3
 
-**A-13 只读存储不可读。** `acquire` 以 `read(true).write(true)` 打开 `.lock`（`crates/bakon-core/src/store/mod.rs:907-915`），共享锁也需要写权限；只读挂载或 0444 的 `.lock` 使 `log` 返回 8。共享锁只需要读 fd 即可使用 `flock(LOCK_SH)`；修复为共享路径以只读打开，且不在共享路径写 holder。需要验证 Windows 的 `try_lock_shared` 对只读句柄的行为。
+**A-13 只读存储不可读。** `acquire` 以 `read(true).write(true)` 打开 `.lock`（`crates/bakon-core/src/store/mod.rs:907-915`），共享锁也需要写权限；只读挂载或 0444 的 `.lock` 使 `log` 返回 8。共享锁只需要读 fd 即可使用 `flock(LOCK_SH)`；已修复为共享路径以只读打开、缺失时先创建再重开，且不在共享路径写 holder。Unix 上已有 0444 `.lock` 的回归用例；Windows 的 `try_lock_shared` 对只读句柄行为仍未验证。
 
-**A-14 版本上界。** `Manifest::validate` 只要求严格连续，不要求 `head < u32::MAX`（`crates/bakon-core/src/manifest.rs:95-146`；`types.rs:213-218`）；单版本 `u32::MAX` 被 `verify` 接受，下一次 `Ver::next` 返回 `Internal` 70。修复：把 `head == u32::MAX` 视为 `Corrupt`（不可再追加），或在 `Ver::next` 溢出时返回明确的“版本号耗尽”错误并让 `verify` 报告。
+**A-14 版本上界。** `Manifest::validate` 只要求严格连续，不要求 `head < u32::MAX`（`crates/bakon-core/src/manifest.rs:95-146`；`types.rs:213-218`）；单版本 `u32::MAX` 被 `verify` 接受，下一次 `Ver::next` 返回 `Internal` 70。已修复：`Manifest::validate` 把 `head == u32::MAX` 视为 `Corrupt`，`verify` 会报告而不是接受；后续提交在加载阶段即被拒绝。
 
-**A-15 临时文件不收敛。** `write_atomic` 的临时文件位于目标目录：清单在 `files/`，索引与 `.pending` 在根目录（`crates/bakon-core/src/fsutil.rs:33-62`；`store/mod.rs:419-424, 669-676, 861-869`；清理仅见 `verify.rs:231-251`）。崩溃或删除失败会留下 `files/<id>.json.<pid>...tmp`、`index.json.*.tmp`、`.pending.*.tmp`；`verify` 只清理 `objects/tmp` 与 `trash`，`init` 为避免误删用户文件，已不再删除标记临时文件。修复：统一使用专用 `tmp/` 目录，或在 `verify`/`init` 中按严格模式清理这些前缀并报告。
+**A-15 临时文件不收敛。** `write_atomic` 的临时文件位于目标目录：清单在 `files/`，索引与 `.pending` 在根目录（`crates/bakon-core/src/fsutil.rs:33-62`；`store/mod.rs:419-424, 669-676, 861-869`；清理仅见 `verify.rs:231-251`）。崩溃或删除失败会留下 `files/<id>.json.<pid>...tmp`、`index.json.*.tmp`、`.pending.*.tmp`；`verify` 只清理 `objects/tmp` 与 `trash`，`init` 为避免误删用户文件，已不再删除标记临时文件。已修复：`verify` 识别根目录与 `files/` 中严格命名的原子写临时文件，报告 `temp_file`，`--fix` 只删除匹配项；不匹配的用户文件保留。
 
-**A-16 锁文件元数据。** 设计说 `.lock` 记录 PID 与开始时间（`design/SEQUENCE__write-protocol-and-failure-paths.md:18`），代码只写 PID（`crates/bakon-core/src/store/mod.rs:947-957`）；`set_len(0)` 后 `writeln` 非原子，超时读者可能看到空/半截内容。仅诊断用，不影响锁语义。修复：写入 `pid start_unix` 并让 `read_holder` 解析两者；或修正文档。
+**A-16 锁文件元数据。** 设计说 `.lock` 记录 PID 与开始时间（`design/SEQUENCE__write-protocol-and-failure-paths.md:18`），代码只写 PID（`crates/bakon-core/src/store/mod.rs:947-957`）；`set_len(0)` 后 `writeln` 非原子，超时读者可能看到空/半截内容。仅诊断用，不影响锁语义。已按诊断契约修正：文档只承诺 PID，代码注释明确写入非原子且读者可能看到空内容；锁语义不依赖该内容。
 
-**A-17 `diff` 参数语义。** `Cli::Diff` 的 `first` 帮助是 “Older version”，`second` 是 “Newer version”（`crates/bakon-cli/src/cli.rs:111-119`）；但单参数路径把唯一的参数当作 **newer**，与它的前一版比较（`crates/bakon-cli/src/commands.rs:691-707`）。因此 `diff file 1` 比较 v0 与 v1，而帮助会让用户以为比较 v1 与最新。修复：把字段改名为 `version`/`base`/`target`，或调整帮助并加测试。
+**A-17 `diff` 参数语义。** `Cli::Diff` 的 `first` 帮助是 “Older version”，`second` 是 “Newer version”（`crates/bakon-cli/src/cli.rs:111-119`）；但单参数路径把唯一的参数当作 **newer**，与它的前一版比较（`crates/bakon-cli/src/commands.rs:691-707`）。因此 `diff file 1` 比较 v0 与 v1，而帮助会让用户以为比较 v1 与最新。已修复：帮助明确“单参数与前一版比较；双参数第一个为旧、第二个为新”，并新增单参数 `diff file 1` 的端到端用例。
 
-**A-18 codec 分派绕过。** `Store::content_for` 按 `VersionRecord.codec` 分派，但 `revert`（目标内容）、`show`、`diff` 直接调用 `Store::content(blob)`（`crates/bakon-cli/src/commands.rs:136, 673, 711-712`；`store/mod.rs:250-259`）。当前只有 `Deflate`，所以没有运行时错误；一旦增加第二种 codec，这三条路径会解码错误。修复：CLI 全部改用 `content_for`；或删除 `codec` 扩展承诺。
+**A-18 codec 分派绕过。** `Store::content_for` 按 `VersionRecord.codec` 分派，但 `revert`（目标内容）、`show`、`diff` 直接调用 `Store::content(blob)`（`crates/bakon-cli/src/commands.rs:136, 673, 711-712`；`store/mod.rs:250-259`）。当前只有 `Deflate`，所以没有运行时错误；一旦增加第二种 codec，这三条路径会解码错误。已修复：`revert` 的目标内容、`show` 与 `diff` 都改用 `content_for`，按版本记录的 codec 分派。
 
-**A-19 `trim_failed` 诊断。** `reclaim_removed` 返回 `Result<usize>`（`crates/bakon-core/src/store/mod.rs:604-619`），`commit` 把任意错误折叠为 `bool`（`:377-386`）；用户只知道“旧对象未回收”，不知道是哪个哈希、移动失败还是清空 `trash` 失败。修复：`Committed` 携带 `Option<TrimFailure { hash: Option<BlobHash>, source: Error }>`，CLI 输出具体信息。
+**A-19 `trim_failed` 诊断。** `reclaim_removed` 返回 `Result<usize>`（`crates/bakon-core/src/store/mod.rs:604-619`），`commit` 把任意错误折叠为 `bool`（`:377-386`）；用户只知道“旧对象未回收”，不知道是哪个哈希、移动失败还是清空 `trash` 失败。已修复：`Committed` 携带 `Option<TrimFailure { hash, detail }>`，`reclaim_removed` 保留失败哈希与错误文本，CLI 输出具体对象和原因。
 
 **A-20 `fsync` 失败后的提交语义。** `write_atomic` 在 `rename` 成功之后才对父目录 `fsync`（`crates/bakon-core/src/fsutil.rs:49-58`）；若 `fsync` 失败，函数返回 `Io` 8，但新清单在运行中的系统里已经可见。`commit` 因此报告失败，用户重试时 `expected_head` 已推进，得到 `HeadChanged` 4。状态机的不变量没有被破坏（清单仍是旧的或新的），但“命令失败”与“提交已发生”不一致。修复不是简单忽略 `fsync` 错误（那会削弱持久性承诺），而是明确提交结果的三态：已持久、已可见但未证明持久、未提交；至少在文档与错误消息中说明重试前应读取 head，并增加故障注入测试。该问题已于 2026-11-11 由 [[ADR__exit-9-when-durability-uncertain]] 裁决：`rename` 为提交点，父目录 `fsync` 失败返回退出码 9；实现与测试见该 ADR 与 `fsutil`。
 
@@ -416,19 +416,19 @@ $$\mathrm{projected}(S)=\{\,f\mid D(f)=\mathrm{content}(\mathrm{head}(M(f)))\,\}
 
 | 编号 | 观察 | 严重度 |
 |---|---|---|
-| O-01 | `Manifest::validate` 不要求时间 UTC/递增，不限制 `pending_apply` 只出现在 `Revert` 或头版本 | P3 |
-| O-02 | `edit` 在编辑器期间路径被 `mv`/重纳管时返回 `Internal` 70，而不是用户冲突 4 | P3 |
-| O-03 | 原地写回保留 inode，因此硬链接的其他路径会被连带修改；设计未声明 | P3 |
-| O-04 | `ObjectStore::put` 发现对象路径已存在即返回成功，不校验既有对象是否完整 | P3 |
-| O-05 | `list_hashes` 忽略非法分片/文件名；损坏对象文件不会被 `verify` 报告或清理 | P3 |
-| O-06 | `begin_apply` 不校验版本/头；`finish_apply` 只清头，可能清错版本 | P3 |
-| O-07 | 恢复时非普通文件返回 3 而非 7；`finish_apply` 的退出码已按 8/9 修正 | P3 |
-| O-08 | `config init` 非原子、无 `fsync`；未知 TOML 字段被静默忽略；提供 `--store` 时仍要求配置文件可解析 | P3 |
-| O-09 | `emit`/`show`/`diff` 把 broken pipe 映射为 8 并打印错误，`bakon show ...` 管道到 `head` 不符合常见预期 | P3 |
-| O-10 | Windows `shell_quote` 只双写引号；`%VAR%` 在 `cmd` 引号内仍会展开；未在 runner 验证 | P3 |
-| O-11 | 文档/API 残余：`Store::versions` 未实现；架构图仍有 `version/`、`fs2` | P3 |
-| O-12 | `Store::init`/`open` 的布局修复与临时清理不持锁；并发 init 会竞争，但最终标记合法 | P3 |
-| O-13 | `rename` 删除内存旧索引键后，若 `remember` 因新键已映射而提前返回，磁盘旧键可能保留；`resolve` 仍能纠正 | P3 |
+| O-01 | `Manifest::validate` 不要求时间 UTC/递增，不限制 `pending_apply` 只出现在 `Revert` 或头版本 | P3（已修复：强制 UTC、pending 仅 Revert 且至多一条；不强制时间递增并记录原因） |
+| O-02 | `edit` 在编辑器期间路径被 `mv`/重纳管时返回 `Internal` 70，而不是用户冲突 4 | P3（已修复：`PathChanged` 退出 4） |
+| O-03 | 原地写回保留 inode，因此硬链接的其他路径会被连带修改；设计未声明 | P3（已在 SEQUENCE 声明并加测试） |
+| O-04 | `ObjectStore::put` 发现对象路径已存在即返回成功，不校验既有对象是否完整 | P3（已修复：损坏对象会被本次写入修复） |
+| O-05 | `list_hashes` 忽略非法分片/文件名；损坏对象文件不会被 `verify` 报告或清理 | P3（已修复：`verify` 报告 `invalid_object`，不自动删除） |
+| O-06 | `begin_apply` 不校验版本/头；`finish_apply` 只清头，可能清错版本 | P3（已修复：校验 head 后继与唯一 pending，按版本清除） |
+| O-07 | 恢复时非普通文件返回 3 而非 7 | P3（已修复：恢复目标非普通文件返回 7 并保留 `.pending`） |
+| O-08 | `config init` 非原子、无 `fsync`；未知 TOML 字段被静默忽略；提供 `--store` 时仍要求配置文件可解析 | P3（已修复原子写入与未知字段；显式 `--store` 仍解析配置以取得 retention/editor，已记录） |
+| O-09 | `emit`/`show`/`diff` 把 broken pipe 映射为 8 并打印错误 | P3（已修复：broken pipe 视为下游关闭） |
+| O-10 | Windows `shell_quote` 只双写引号；`%VAR%` 在 `cmd` 引号内仍会展开；未在 runner 验证 | P3（Ubuntu 无法验证，保留） |
+| O-11 | 文档/API 残余：`Store::versions` 未实现；架构图仍有 `version/`、`fs2` | P3（已修复：实现 `versions`，更新架构图） |
+| O-12 | `Store::init`/`open` 的布局修复与临时清理不持锁；并发 init 会竞争，但最终标记合法 | P3（已记录为幂等设计：不写清单/对象，最后标记生效） |
+| O-13 | `rename` 删除内存旧索引键后，若 `remember` 因新键已映射而提前返回，磁盘旧键可能保留；`resolve` 仍能纠正 | P3（已修复：`rename` 总是重写索引） |
 
 ## 7. 交叉论证
 
@@ -469,8 +469,8 @@ A-07 说明 `AbsPath` 的等价关系不是内核等价关系：词法折叠把�
 | 2 | A-11 | 引用集只用有效清单；损坏清单单独报告 | 已修复：一份损坏 + 一个孤儿对象，`verify` 同时报告 `manifest`/`orphan_scan`，`--fix` 不删对象 |
 | 2 | A-12 | 状态命令补 JSON；全局参数或文档 | 已修复：`hook set/unset`、`config init` 的 JSON 可解析；`--no-hook` 全局位置可用 |
 | 2 | A-20 | 定义 `rename` 后 `fsync` 失败的提交语义；故障注入 | 失败后重跑不产生重复版本，且用户能判断是否已提交 |
-| 3 | A-13 至 A-19 | 见第 6 节 | 对应单元/端到端用例 |
-| 3 | O-01 至 O-13 | 见第 6.4 节 | 文档同步或小修 |
+| 3 | A-13 至 A-19 | 已在 Ubuntu 可验证范围内修复或按诊断契约修正文档 | 只读锁、版本上界、临时文件、diff、codec、trim 诊断均有回归用例 |
+| 3 | O-01 至 O-13 | 已修复 O-01 至 O-09、O-11 至 O-13；O-10 留待 Windows | 单元/端到端用例或文档同步 |
 
 ## 9. 独立校验
 
@@ -481,7 +481,7 @@ A-07 说明 `AbsPath` 的等价关系不是内核等价关系：词法折叠把�
 - `cargo fmt --all --check`：通过。
 - R-01 至 R-11 与 R-14 使用真实二进制与隔离存储复现；R-12/R-13 已转为 `store` 单元回归用例。
 - 0600 文件的对象权限、只读存储、损坏清单、`u32::MAX` 清单、`.pending` 缺失清单均按第 5 节观测。
-- A-20 的退出码 9 实现后测试总数为 123；A-01 至 A-09、A-11 与 A-12 修复后为 142，另有 1 个 `compile_fail` 文档用例；本节的 120 是审计时基线。
+- A-20 的退出码 9 实现后测试总数为 123；A-01 至 A-09、A-11、A-12 与 Ubuntu 可做的 P3 修复后为 159，另有 1 个 `compile_fail` 文档用例；本节的 120 是审计时基线。
 
 ### 9.2 未覆盖
 

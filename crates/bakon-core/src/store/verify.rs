@@ -116,6 +116,16 @@ impl Store {
         // 损坏清单的对象引用不可知；此时不能把未解析到的对象当作孤儿删除。
         let reachability_complete = manifests.len() == ids.len();
 
+        for path in self.objects().invalid_entries()? {
+            report.items.push(VerifyItem {
+                kind: "invalid_object",
+                path: Some(path),
+                ver: None,
+                detail: "not a valid object path".into(),
+                fixed: false,
+            });
+        }
+
         match self.read_pending() {
             Ok(entries) if !entries.is_empty() => report.items.push(VerifyItem {
                 kind: "pending_apply",
@@ -148,6 +158,23 @@ impl Store {
                     fixed: false,
                 });
             }
+        }
+
+        let temporary = self.temporary_files()?;
+        if !temporary.is_empty() {
+            let fixed = fix;
+            if fixed {
+                for path in &temporary {
+                    fs::remove_file(path.as_path()).map_err(Error::Io)?;
+                }
+            }
+            report.items.push(VerifyItem {
+                kind: "temp_file",
+                path: None,
+                ver: None,
+                detail: format!("{} stale temporary file(s)", temporary.len()),
+                fixed,
+            });
         }
 
         let mut paths: BTreeMap<String, FileId> = BTreeMap::new();

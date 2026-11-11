@@ -28,7 +28,12 @@ pub enum Codec { Deflate }
 
 ```rust
 pub struct Prepared { manifest: Manifest, content: Vec<u8> }
-pub struct Committed { id: FileId, version: Ver }
+pub struct Committed {
+    id: FileId,
+    version: Ver,
+    trim_failure: Option<TrimFailure>,
+}
+pub struct TrimFailure { hash: Option<BlobHash>, detail: String }
 
 impl Store {
     /// 构造纳管提交：生成身份与基线版本。
@@ -59,7 +64,7 @@ impl Committed {
 | `manifest(FileId) -> Manifest` | id 存在 | — | 3（不存在）、6（损坏） |
 | `head(FileId) -> Option<VersionRecord>` | — | 返回最后一条版本 | 6 |
 | `content(&BlobHash) -> Vec<u8>` | 对象存在 | 解压并校验哈希 | 6（缺失、损坏） |
-| `versions(FileId) -> &[VersionRecord]` | — | 升序 | 6 |
+| `versions(FileId) -> Vec<VersionRecord>` | id 存在 | 升序；等价于 `manifest(id).versions` | 3、6 |
 | `begin_write() -> WriteLock` | — | 持排他锁并恢复 `.pending`；无法证明的记录保留并退出 6 | 4、8、6 |
 | `begin_verify() -> WriteLock` | — | 持排他锁但不自动恢复；供 `verify --fix` 先报告再处理 `.pending` | 4、8 |
 | `lock_shared() -> ReadLock` | — | 持共享锁；不能传给任何写接口 | 4、8 |
@@ -68,7 +73,7 @@ impl Committed {
 | `prune_dry_run(&[FileId]) -> PruneReport` | 持共享锁 | 只报告，不改变持久状态 | 6 |
 | `rename(&WriteLock, FileId, AbsPath)` | 持写锁 | 更新清单 `path` 与缓存 | 4（目标已存在） |
 | `set_hook(&WriteLock, FileId, Option<String>)` | 持写锁 | 写入清单 | 8、9 |
-| `begin_apply(&WriteLock, …)` / `finish_apply(&WriteLock, FileId)` | 持写锁 | 建立/清除 `.pending` 与 pending 标记 | 8、9、6 |
+| `begin_apply(&WriteLock, …, Ver)` / `finish_apply(&WriteLock, FileId, Ver)` | 持写锁；版本为当前 head 的后继 / 指定 pending 版本 | 校验 head、blob 与唯一 pending，再建立/清除 `.pending` 与 pending 标记 | 8、9、6 |
 | `committed(&WriteLock, FileId, Ver) -> Committed` | 持写锁，版本存在 | 构造写回句柄 | 3、6 |
 | `verify(options) -> Report` | 持共享锁 | 只读检查 | 6 |
 | `verify_fix(&WriteLock, options) -> Report` | 持写锁 | 检查并修复派生数据 | 6、8、9（修复时持久性未确认） |
@@ -90,6 +95,7 @@ pub enum Error {
     LockTimeout { holder: Option<u32>, waited: Duration },
     Diverged { path: AbsPath, hint: &'static str },
     HeadChanged { expected: Ver, actual: Ver },
+    PathChanged(AbsPath),
     AlreadyManaged { path: AbsPath },
     Corrupt { what: &'static str, detail: String },
     ApplyFailed { ver: Ver, source: io::Error },
@@ -117,7 +123,7 @@ pub enum Error {
 | `bakon init` | `--store` | 创建存储目录与标记；已存在且合法则无操作 |
 | `bakon edit <file>` | `--editor <cmd>`（全局 `--no-hook`） | 首次自动纳管；编辑器退出后按需提交 |
 | `bakon log <file>` | `--format` | 最新在前；大小取自清单 |
-| `bakon diff <file> [v1] [v2]` | — | 0 个参数比较最近两版；1 个参数与其前一版比较 |
+| `bakon diff <file> [v1] [v2]` | — | 0 个参数比较最近两版；1 个参数与它的前一版比较；2 个参数中 v1 为旧、v2 为新 |
 | `bakon show <file> <v>` | — | 原始字节输出 |
 | `bakon dump <file> <v>` | — | 与 `show` 相同，保留为管道命令名 |
 | `bakon revert <file> <v>` | `--force`（全局 `--no-hook`） | 分歧默认拒绝；`--force` 先记 `salvage` |
@@ -135,7 +141,7 @@ pub enum Error {
 
 `edit` 的编辑器取 `--editor` → `$VISUAL` → `$EDITOR` → 配置 `editor` → `vi`；诊断与进度走 stderr，stdout 只放数据。
 
-配置文件位置：`--config` > `$BAKON_CONFIG` > `$BAKON_HOME/config.toml` > `$XDG_CONFIG_HOME/bakon/config.toml` > `~/.config/bakon/config.toml`。v1 不读取 0.x 的 `~/.bakon/config.toml`，避免沿用指向旧 `repo/` 的 `store`。
+配置文件位置：`--config` > `$BAKON_CONFIG` > `$BAKON_HOME/config.toml` > `$XDG_CONFIG_HOME/bakon/config.toml` > `~/.config/bakon/config.toml`。v1 不读取 0.x 的 `~/.bakon/config.toml`，避免沿用指向旧 `repo/` 的 `store`。即使显式给出 `--store`，配置文件仍会被解析以取得 retention 与 editor；配置损坏时退出 2。配置文件写入使用临时文件 + `fsync` + `rename`，并拒绝未知字段。
 
 ## 6. 输出格式
 

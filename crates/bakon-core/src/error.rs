@@ -37,6 +37,8 @@ pub enum Error {
     Diverged { path: AbsPath, hint: &'static str },
     /// 编辑期间 head 被其他写者推进。
     HeadChanged { expected: Ver, actual: Ver },
+    /// 编辑期间路径被 `mv` 或重新纳管，不能再提交到原路径。
+    PathChanged(AbsPath),
     /// 钩子执行失败。
     HookFailed { ver: Ver, status: i32 },
     /// 编辑器以非零状态退出。
@@ -77,6 +79,7 @@ impl Error {
             Self::LockTimeout { .. }
             | Self::Diverged { .. }
             | Self::HeadChanged { .. }
+            | Self::PathChanged(_)
             | Self::AlreadyManaged { .. } => 4,
             Self::HookFailed { .. } | Self::EditorFailed { .. } => 5,
             Self::NotAStore { .. }
@@ -140,6 +143,11 @@ impl fmt::Display for Error {
                 "head changed from {} to {} during the edit; re-run the command",
                 expected.get(),
                 actual.get()
+            ),
+            Self::PathChanged(path) => write!(
+                f,
+                "{} was moved or re-tracked during the edit; re-run the command",
+                path.as_path().display()
             ),
             Self::HookFailed { ver, status } => {
                 write!(
@@ -274,6 +282,7 @@ mod tests {
                 4,
             ),
             (Error::AlreadyManaged { path: path() }, 4),
+            (Error::PathChanged(path()), 4),
             (
                 Error::HookFailed {
                     ver: Ver::new(1).unwrap(),

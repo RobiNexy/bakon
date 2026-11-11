@@ -126,6 +126,20 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn in_place_write_is_visible_through_hard_links() {
+        let temporary = TempDir::new().unwrap();
+        let target = temporary.path().join("target");
+        let link = temporary.path().join("link");
+        fs::write(&target, b"old").unwrap();
+        fs::hard_link(&target, &link).unwrap();
+
+        write_target(&AbsPath::new(&target).unwrap(), b"new").unwrap();
+
+        assert_eq!(fs::read(&link).unwrap(), b"new");
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn refuses_a_dangling_symlink() {
         let temporary = TempDir::new().unwrap();
         let link = temporary.path().join("dangling");

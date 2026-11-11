@@ -110,9 +110,9 @@ pub enum Command {
     Diff {
         /// Tracked file
         file: PathBuf,
-        /// Older version; defaults to the previous version
+        /// Version to compare; with one argument, compare it with its previous version
         first: Option<u32>,
-        /// Newer version; defaults to the latest version
+        /// Newer version; with two arguments, the first is older and the second is newer
         second: Option<u32>,
     },
     /// Trim old versions for one file or every file
