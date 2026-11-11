@@ -10,7 +10,7 @@ use crate::fsutil::remove_dir_contents;
 use crate::types::{AbsPath, BlobHash, FileId, Ver};
 use crate::{Error, Result};
 
-use super::Store;
+use super::{Store, WriteLock};
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct VerifyOptions {
@@ -51,10 +51,38 @@ impl VerifyReport {
 }
 
 impl Store {
-    /// 检查全部清单、对象、索引与残留目录。`fix` 需要调用方持有排他锁。
+    /// 只读检查全部清单、对象、索引与残留目录；调用方持共享锁。
     pub fn verify(&mut self, options: VerifyOptions) -> Result<VerifyReport> {
-        let stale = if options.fix && self.pending_path().as_path().exists() {
-            self.recover()?
+        if options.fix {
+            return Err(Error::Internal("verify --fix requires a write lock".into()));
+        }
+        self.verify_inner(None, options)
+    }
+
+    /// 检查并修复派生数据；调用方必须持有排他写锁。
+    pub fn verify_fix(&mut self, lock: &WriteLock, options: VerifyOptions) -> Result<VerifyReport> {
+        self.verify_inner(
+            Some(lock),
+            VerifyOptions {
+                fix: true,
+                ..options
+            },
+        )
+    }
+
+    fn verify_inner(
+        &mut self,
+        lock: Option<&WriteLock>,
+        options: VerifyOptions,
+    ) -> Result<VerifyReport> {
+        let fix = lock.is_some();
+        if options.fix != fix {
+            return Err(Error::Internal(
+                "verify fix mode must match the lock kind".into(),
+            ));
+        }
+        let stale = if fix && self.pending_path().as_path().exists() {
+            self.recover(lock.expect("fix mode has a write lock"))?
         } else {
             Vec::new()
         };
@@ -168,9 +196,9 @@ impl Store {
                                     record.size,
                                     content.len()
                                 ),
-                                fixed: options.fix,
+                                fixed: fix,
                             });
-                            if options.fix {
+                            if fix {
                                 repaired.versions[index].size = content.len() as u64;
                                 repaired_any = true;
                             }
@@ -187,7 +215,7 @@ impl Store {
             }
 
             if repaired_any {
-                self.save_manifest(&repaired)?;
+                self.save_manifest(lock.expect("repairs require a write lock"), &repaired)?;
             }
             if options.size {
                 let manifest_bytes = fs::metadata(self.manifest_path(*id).as_path())
@@ -207,13 +235,13 @@ impl Store {
             .map(|(id, manifest)| (manifest.path.key(), *id))
             .collect();
         if self.load_index().entries != expected {
-            let fixed = options.fix;
+            let fixed = fix;
             if fixed {
                 self.index = Some(super::IndexCache {
                     schema: crate::SUPPORTED_SCHEMA,
                     entries: expected,
                 });
-                self.save_index()?;
+                self.save_index(lock.expect("repairs require a write lock"))?;
             }
             report.items.push(VerifyItem {
                 kind: "index",
@@ -226,9 +254,9 @@ impl Store {
 
         let orphans = self.orphan_hashes()?;
         if !orphans.is_empty() {
-            let fixed = options.fix;
+            let fixed = fix;
             if fixed {
-                self.reclaim_orphans()?;
+                self.reclaim_orphans(lock.expect("repairs require a write lock"))?;
             }
             report.items.push(VerifyItem {
                 kind: "orphan_object",
@@ -247,7 +275,7 @@ impl Store {
                 Err(error) => return Err(Error::Io(error)),
             };
             if count > 0 {
-                let fixed = options.fix;
+                let fixed = fix;
                 if fixed {
                     remove_dir_contents(path.as_path())?;
                 }

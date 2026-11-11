@@ -12,7 +12,8 @@
 - 第三次全量审计（[[design-audit-v1-2026-11-11]]）覆盖 21 个 Rust 文件，审计时 120 个测试；结论为 2 项 P1（`init` 删除 `BAKON_STORE.*.tmp` 形状的用户文件、恢复对不可判定 pending 假成功并删除 `.pending`）、11 项 P2、7 项主 P3 与 13 项次要观察。正常 CLI 主路径未发现新的数据损坏反例；外部评审 10 项中 7 项成立、2 项部分成立、1 项仅为可读性。两项 P1 已在下一条中修复。
 - A-01/A-02 已修复：`init` 只忽略严格数字形状的 `BAKON_STORE.<pid>.<seq>.<rand>.tmp`，匹配项也不删除；非匹配用户文件仍拒绝初始化。恢复现在校验 `entry.version`/`new_blob`，清单缺失、版本被裁剪或不匹配时保留 `.pending` 并退出 6；只有可证明未提交的记录才丢弃，`verify --fix` 报告 `pending_stale`。
 - A-03/A-04/A-05/A-06 已修复：`revert` 目标已匹配且存在时 no-op，不截断重写；`commit` 的 track 分支检查路径唯一；`prune` 对 `FileId` 去重并使用 checked 计数；`Store::open` 只打开已有存储，`init` 命令与首次 `edit` 才创建。
-- A-20 已按 [[ADR__exit-9-when-durability-uncertain]] 实现：清单 `rename` 为提交点，父目录 `fsync` 失败返回退出码 9；`edit` 的可见版本、`revert` 的 `.pending` 保留与后续恢复有故障注入用例；对象、`.pending`、索引与标记的写入仍严格返回 8；当前测试总数 136。
+- A-07/A-08/A-09 已修复：`AbsPath::new` 拒绝任何 `..`（退出 2），`join` 收紧为 `pub(crate)`；Unix 新建目录为 `0700`、新建文件为 `0600`；锁拆为 `ReadLock`/`WriteLock`，所有写接口要求 `&WriteLock`，并有一个 `compile_fail,E0308` 文档用例。
+- A-20 已按 [[ADR__exit-9-when-durability-uncertain]] 实现：清单 `rename` 为提交点，父目录 `fsync` 失败返回退出码 9；`edit` 的可见版本、`revert` 的 `.pending` 保留与后续恢复有故障注入用例；对象、`.pending`、索引与标记的写入仍严格返回 8；当前测试总数 138，另有 1 个 `compile_fail` 文档用例。
 
 ## Known limitations
 
@@ -21,7 +22,7 @@
 - 旧存储迁移不在 v1.0 范围；旧 `repo/` 不被读取也不被删除。
 - `edit` 通过 `sh -c` 启动编辑器，Windows 语义属 M3。
 - 复审剩余：`commit`/`prune`/`rename` 的写锁仍是调用点约定；Windows/macOS 大小写路径键未在 runner 验证；实际裁剪仍需全局引用扫描。`..` 路径、类型化写回、`codec` 分派与 CLI 命令已修复。
-- 全量审计新增限制：只读存储因 `.lock` 以读写方式打开而无法读取；对象与目录权限随 `umask`，不保证 0600 文件的机密性；Windows 全量测试未跑通（测试夹具依赖 `sh` 与 `/tmp` 断言）；初始化标记临时文件只忽略不删除，根目录临时文件仍无自动清理（A-15）。
+- 全量审计新增限制：只读存储因 `.lock` 以读写方式打开而无法读取；Windows 全量测试未跑通（测试夹具依赖 `sh` 与 `/tmp` 断言）；初始化标记临时文件只忽略不删除，根目录临时文件仍无自动清理（A-15）。
 - 人工验收流程见 [[OPS__manual-testing]]；`README.md`/`README.en.md` 只保留介绍与使用说明。仓库与本地目录已改为小写 `bakon`，`v1.0.1` 已打 tag 并完成 Release；`edit --editor` 与详细使用说明已包含在发布中。
 - 端到端 1 MB 文本提交实测约 50 ms（本机 ext4/NVMe），验收预算已调整为 60 ms；成本主要是进程启动、编辑器与 fsync。
 

@@ -6,9 +6,6 @@
 
 > 审计来源：[[design-audit-2026-11-10]]、[[design-audit-v1-2026-11-10]]、[[design-audit-v1-2026-11-10-recheck]]、[[design-audit-v1-2026-11-11]]；v1 设计入口：[[MODULE__bakon-v1-design]]。
 
-- P2 v1 全量审计：`..` 经过普通文件/缺失前缀时按词法折叠，路径身份与内核不一致（A-07）
-- P2 v1 全量审计：对象与存储目录权限随 `umask`，0600 文件内容可能以 0664 存放（A-08）
-- P2 v1 全量审计：读写锁未类型化，写接口不要求 guard（A-09，取代原复审残余条目）
 - P2 v1 全量审计：CLI 测试依赖 `sh`/可执行脚本与 `/tmp` 断言，Windows 全量测试不可用（A-10）
 - P2 v1 全量审计：`verify` 遇到损坏清单在孤儿扫描处整体失败，报告项丢失（A-11）
 - P2 v1 全量审计：`hook set/unset`、`config init` 忽略 `--format json`；全局 `--no-hook`/`--no-color` 缺失（A-12）

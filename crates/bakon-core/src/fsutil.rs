@@ -12,6 +12,34 @@ use crate::{Error, Result};
 
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+/// 创建目录；Unix 上新建目录权限为 0700。已存在的目录不改动权限。
+pub(crate) fn create_private_dir_all(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+
+        let mut builder = fs::DirBuilder::new();
+        builder.recursive(true).mode(0o700);
+        builder.create(path).map_err(Error::Io)
+    }
+    #[cfg(not(unix))]
+    {
+        fs::create_dir_all(path).map_err(Error::Io)
+    }
+}
+
+/// 私有文件的打开选项：Unix 上新建文件权限为 0600。调用方补充读写标志。
+pub(crate) fn private_file_options() -> OpenOptions {
+    let mut options = OpenOptions::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        options.mode(0o600);
+    }
+    options
+}
+
 /// 保证目录项本身已落盘；只 fsync 文件不足以让 `rename` 结果持久。
 #[cfg(unix)]
 fn fsync_dir_raw(path: &Path) -> io::Result<()> {
@@ -56,10 +84,10 @@ pub(crate) fn write_atomic(
     tmp_dir: &AbsPath,
     bytes: &[u8],
 ) -> Result<WriteOutcome> {
-    fs::create_dir_all(tmp_dir.as_path()).map_err(Error::Io)?;
+    create_private_dir_all(tmp_dir.as_path())?;
     let temporary = temporary_path(tmp_dir, path);
 
-    let mut file = OpenOptions::new()
+    let mut file = private_file_options()
         .write(true)
         .create_new(true)
         .open(temporary.as_path())
@@ -172,4 +200,32 @@ pub(crate) fn remove_dir_contents(path: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
+    use tempfile::TempDir;
+
+    use super::*;
+
+    fn mode(path: &Path) -> u32 {
+        fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[test]
+    fn atomic_write_creates_private_directories_and_files() {
+        let temporary = TempDir::new().unwrap();
+        let root = AbsPath::new(temporary.path().join("store")).unwrap();
+        let path = root.join("data.json");
+
+        write_atomic(&path, &root, b"secret")
+            .unwrap()
+            .require_durable()
+            .unwrap();
+
+        assert_eq!(mode(root.as_path()), 0o700);
+        assert_eq!(mode(path.as_path()), 0o600);
+    }
 }

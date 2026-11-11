@@ -44,7 +44,7 @@ impl ObjectStore {
 
         let compressed = deflate(plain)?;
         if let Some(shard) = path.as_path().parent() {
-            fs::create_dir_all(shard).map_err(Error::Io)?;
+            crate::fsutil::create_private_dir_all(shard)?;
             crate::fsutil::fsync_dir(self.root.as_path())?;
         }
         write_atomic(&path, &self.temporary, &compressed)?.require_durable()?;

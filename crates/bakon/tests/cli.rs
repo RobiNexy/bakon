@@ -813,6 +813,32 @@ fn verify_fix_reports_an_index_write_failure() {
     assert!(fixture.store.join("index.json").is_dir());
 }
 
+#[test]
+fn parent_components_are_a_usage_error() {
+    let temporary = TempDir::new().unwrap();
+    let store = temporary.path().join("store");
+    let blocker = temporary.path().join("blocker");
+    let victim = temporary.path().join("victim");
+    fs::write(&blocker, b"not a directory").unwrap();
+    fs::write(&victim, b"content").unwrap();
+    let path = blocker.join("..").join("victim");
+
+    let output = run(&[
+        "--store",
+        store.to_str().unwrap(),
+        "edit",
+        path.to_str().unwrap(),
+    ]);
+
+    assert_eq!(output.status.code(), Some(2), "stderr: {}", stderr(&output));
+    assert!(
+        stderr(&output).contains("path contains '..'"),
+        "stderr: {}",
+        stderr(&output)
+    );
+    assert!(!store.exists(), "a usage error must not create a store");
+}
+
 #[cfg(unix)]
 #[test]
 fn a_non_utf8_path_is_a_usage_error() {

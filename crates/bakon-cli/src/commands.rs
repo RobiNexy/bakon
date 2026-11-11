@@ -11,7 +11,7 @@ use std::time::Duration;
 use bakon_core::manifest::{Manifest, Source, VersionRecord};
 use bakon_core::object::hash_bytes;
 use bakon_core::store::{Committed, VerifyOptions};
-use bakon_core::{AbsPath, Error, Result, Store, Ver};
+use bakon_core::{AbsPath, Error, FileId, Result, Store, Ver};
 
 use crate::cli::{Cli, ConfigAction, Format, HookAction, StoreAction};
 use crate::config::{self, Config};
@@ -56,7 +56,7 @@ pub fn edit(cli: &Cli, file: &Path, no_hook: bool, editor: Option<&str>) -> Resu
     let timeout = lock_timeout(cli);
 
     let (id, head, content_hash) = {
-        let _guard = store.begin_write(timeout)?;
+        let guard = store.begin_write(timeout)?;
         match store.resolve(&path)? {
             Some(id) => {
                 let manifest = store.manifest(id)?;
@@ -72,8 +72,8 @@ pub fn edit(cli: &Cli, file: &Path, no_hook: bool, editor: Option<&str>) -> Resu
             }
             None => {
                 let content = read_target(&path)?;
-                let prepared = store.prepare_track(&path, &content)?;
-                let committed = store.commit(prepared, None)?;
+                let prepared = store.prepare_track(&guard, &path, &content)?;
+                let committed = store.commit(&guard, prepared, None)?;
                 warn_trim(&committed);
                 eprintln!(
                     "bakon: tracked {} (baseline version {})",
@@ -93,15 +93,15 @@ pub fn edit(cli: &Cli, file: &Path, no_hook: bool, editor: Option<&str>) -> Resu
     }
 
     let (committed, hook_manifest) = {
-        let _guard = store.begin_write(timeout)?;
+        let guard = store.begin_write(timeout)?;
         if store.resolve(&path)? != Some(id) {
             return Err(Error::Internal(format!(
                 "{} was re-tracked while the editor was open",
                 path
             )));
         }
-        let prepared = store.prepare_commit(id, &edited, Source::Edit)?;
-        let committed = store.commit(prepared, Some(head))?;
+        let prepared = store.prepare_commit(&guard, id, &edited, Source::Edit)?;
+        let committed = store.commit(&guard, prepared, Some(head))?;
         warn_trim(&committed);
         let manifest = store.manifest(id)?;
         (committed, manifest)
@@ -127,7 +127,7 @@ pub fn revert(cli: &Cli, file: &Path, version: u32, force: bool, no_hook: bool) 
     let timeout = lock_timeout(cli);
 
     let (committed, hook_manifest, previous) = {
-        let _guard = store.begin_write(timeout)?;
+        let guard = store.begin_write(timeout)?;
         let id = store
             .resolve(&path)?
             .ok_or(Error::NotManaged(path.clone()))?;
@@ -157,8 +157,8 @@ pub fn revert(cli: &Cli, file: &Path, version: u32, force: bool, no_hook: bool) 
         let mut previous = head.ver;
         if diverged {
             let content = current.expect("diverged implies content");
-            let salvage = store.prepare_commit(id, &content, Source::Salvage)?;
-            let salvaged = store.commit(salvage, Some(head.ver))?;
+            let salvage = store.prepare_commit(&guard, id, &content, Source::Salvage)?;
+            let salvaged = store.commit(&guard, salvage, Some(head.ver))?;
             warn_trim(&salvaged);
             previous = salvaged.version();
         }
@@ -174,13 +174,13 @@ pub fn revert(cli: &Cli, file: &Path, version: u32, force: bool, no_hook: bool) 
             // 保护的写回窗口。只有目标缺失时才需要创建。
             if !current_exists {
                 store
-                    .committed(id, head.ver)?
-                    .apply(&store, &path)
+                    .committed(&guard, id, head.ver)?
+                    .apply(&guard, &store, &path)
                     .map_err(|error| applied(error, head.ver))?;
             }
             (None, manifest, previous)
         } else {
-            let mut prepared = store.prepare_commit(id, &target_content, Source::Revert)?;
+            let mut prepared = store.prepare_commit(&guard, id, &target_content, Source::Revert)?;
             prepared.set_pending(true);
             let pending_version = prepared
                 .manifest()
@@ -190,13 +190,13 @@ pub fn revert(cli: &Cli, file: &Path, version: u32, force: bool, no_hook: bool) 
                     detail: format!("{id} has no versions"),
                 })?
                 .ver;
-            store.begin_apply(id, pending_version, old_blob, new_blob)?;
-            let committed = store.commit(prepared, Some(head.ver))?;
+            store.begin_apply(&guard, id, pending_version, old_blob, new_blob)?;
+            let committed = store.commit(&guard, prepared, Some(head.ver))?;
             warn_trim(&committed);
             committed
-                .apply(&store, &path)
+                .apply(&guard, &store, &path)
                 .map_err(|error| applied(error, committed.version()))?;
-            store.finish_apply(id)?;
+            store.finish_apply(&guard, id)?;
             let manifest = store.manifest(id)?;
             (Some(committed), manifest, previous)
         }
@@ -228,20 +228,15 @@ pub fn revert(cli: &Cli, file: &Path, version: u32, force: bool, no_hook: bool) 
 pub fn prune(cli: &Cli, file: Option<&Path>, dry_run: bool) -> Result<u8> {
     let mut store = open_store(cli)?;
     let timeout = lock_timeout(cli);
-    let _guard = if dry_run {
-        store.lock_shared(timeout)?
+    let report = if dry_run {
+        let _guard = store.lock_shared(timeout)?;
+        let ids = prune_ids(&mut store, file)?;
+        store.prune_dry_run(&ids)?
     } else {
-        store.begin_write(timeout)?
+        let guard = store.begin_write(timeout)?;
+        let ids = prune_ids(&mut store, file)?;
+        store.prune(&guard, &ids)?
     };
-
-    let ids = match file {
-        Some(file) => {
-            let path = AbsPath::new(file)?;
-            vec![store.resolve(&path)?.ok_or(Error::NotManaged(path))?]
-        }
-        None => store.all_ids()?,
-    };
-    let report = store.prune(&ids, dry_run)?;
 
     if report.files.is_empty() {
         match cli.format {
@@ -279,17 +274,27 @@ pub fn prune(cli: &Cli, file: Option<&Path>, dry_run: bool) -> Result<u8> {
     Ok(0)
 }
 
+fn prune_ids(store: &mut Store, file: Option<&Path>) -> Result<Vec<FileId>> {
+    match file {
+        Some(file) => {
+            let path = AbsPath::new(file)?;
+            Ok(vec![store.resolve(&path)?.ok_or(Error::NotManaged(path))?])
+        }
+        None => store.all_ids(),
+    }
+}
+
 /// `mv`：只改记录中的路径，不动磁盘文件。
 pub fn mv(cli: &Cli, old: &Path, new: &Path) -> Result<u8> {
     let old = AbsPath::new(old)?;
     let new = AbsPath::new(new)?;
     let mut store = open_store(cli)?;
-    let _guard = store.begin_write(lock_timeout(cli))?;
+    let guard = store.begin_write(lock_timeout(cli))?;
 
     let id = store
         .resolve(&old)?
         .ok_or_else(|| Error::NotManaged(old.clone()))?;
-    store.rename(id, new.clone())?;
+    store.rename(&guard, id, new.clone())?;
 
     match cli.format {
         Format::Human => emit(&format!("renamed {old} -> {new}"))?,
@@ -329,19 +334,19 @@ pub fn hook(cli: &Cli, action: HookAction, file: &Path, command: Option<&str>) -
             if command.trim().is_empty() {
                 return Err(Error::Usage("hook command cannot be empty".into()));
             }
-            let _guard = store.begin_write(timeout)?;
+            let guard = store.begin_write(timeout)?;
             let id = store
                 .resolve(&path)?
                 .ok_or_else(|| Error::NotManaged(path.clone()))?;
-            store.set_hook(id, Some(command.to_owned()))?;
+            store.set_hook(&guard, id, Some(command.to_owned()))?;
             emit(&format!("hook set for {path}"))?;
         }
         HookAction::Unset => {
-            let _guard = store.begin_write(timeout)?;
+            let guard = store.begin_write(timeout)?;
             let id = store
                 .resolve(&path)?
                 .ok_or_else(|| Error::NotManaged(path.clone()))?;
-            store.set_hook(id, None)?;
+            store.set_hook(&guard, id, None)?;
             emit(&format!("hook unset for {path}"))?;
         }
     }
@@ -399,12 +404,13 @@ pub fn config(cli: &Cli, action: ConfigAction) -> Result<u8> {
 pub fn verify(cli: &Cli, fix: bool, size: bool) -> Result<u8> {
     let mut store = open_store(cli)?;
     let timeout = lock_timeout(cli);
-    let _guard = if fix {
-        store.begin_verify(timeout)?
+    let report = if fix {
+        let guard = store.begin_verify(timeout)?;
+        store.verify_fix(&guard, VerifyOptions { fix: true, size })?
     } else {
-        store.lock_shared(timeout)?
+        let _guard = store.lock_shared(timeout)?;
+        store.verify(VerifyOptions { fix: false, size })?
     };
-    let report = store.verify(VerifyOptions { fix, size })?;
 
     match cli.format {
         Format::Human => {

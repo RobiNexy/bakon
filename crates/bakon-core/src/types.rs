@@ -4,19 +4,22 @@
 //! 混用。约束见 `design/API__store-contract-and-cli.md` §1。
 
 use std::fmt;
-use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::{Error, Result};
 
-/// 规范化绝对路径：构造时绝对化并做词法清理，不解析符号链接。
+/// 规范化绝对路径：构造时绝对化并清理 `.`，拒绝 `..`，不解析符号链接。
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct AbsPath(PathBuf);
 
 impl AbsPath {
-    /// 把任意路径绝对化并清理 `.`/`..`；拒绝经过符号链接的 `..`，不解析最终目标。
+    /// 把任意路径绝对化并清理 `.`；拒绝任何 `..`。
+    ///
+    /// 词法折叠 `..` 与内核解析并不等价：`dir/file/../victim` 在词法上是
+    /// `dir/victim`，内核却会因 `file` 不是目录返回 `ENOTDIR`；缺失前缀同理。
+    /// 因此用户输入必须先规范化，不能由本类型猜测内核语义。
     pub fn new(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         let absolute = if path.is_absolute() {
@@ -24,7 +27,15 @@ impl AbsPath {
         } else {
             std::env::current_dir().map_err(Error::Io)?.join(path)
         };
-        reject_symlinked_parent_traversal(&absolute)?;
+        if absolute
+            .components()
+            .any(|component| component == Component::ParentDir)
+        {
+            return Err(Error::Usage(format!(
+                "path contains '..'; pass a normalized absolute path: {}",
+                path.display()
+            )));
+        }
         let cleaned = clean(&absolute);
         if !cleaned.is_absolute() {
             return Err(Error::Internal(format!(
@@ -41,7 +52,9 @@ impl AbsPath {
     }
 
     /// 以本路径为根拼接相对路径。
-    pub fn join(&self, relative: impl AsRef<Path>) -> Self {
+    ///
+    /// 只供内部固定组件使用；不检查符号链接，不能作为公共安全构造器。
+    pub(crate) fn join(&self, relative: impl AsRef<Path>) -> Self {
         Self(clean(&self.0.join(relative.as_ref())))
     }
 
@@ -92,41 +105,8 @@ impl<'de> Deserialize<'de> for AbsPath {
     }
 }
 
-/// `..` 只有在它前面的路径不经过符号链接时才能按词法折叠；
-/// 否则内核解析结果会指向另一个文件，必须在进入存储前拒绝。
-fn reject_symlinked_parent_traversal(path: &Path) -> Result<()> {
-    let mut prefix = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::ParentDir => {
-                match fs::symlink_metadata(&prefix) {
-                    Ok(metadata) if metadata.file_type().is_symlink() => {
-                        return Err(Error::Usage(format!(
-                            "path traverses a symbolic link before '..': {}",
-                            path.display()
-                        )));
-                    }
-                    Ok(_) => {
-                        let canonical = fs::canonicalize(&prefix).map_err(Error::Io)?;
-                        if canonical != prefix {
-                            return Err(Error::Usage(format!(
-                                "path traverses a symbolic link before '..': {}",
-                                path.display()
-                            )));
-                        }
-                    }
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(error) => return Err(Error::Io(error)),
-                }
-                prefix.pop();
-            }
-            other => prefix.push(other.as_os_str()),
-        }
-    }
-    Ok(())
-}
-
-/// 词法清理：去掉 `.`，折叠 `..`，不解析符号链接。
+/// 词法清理：去掉 `.`，折叠 `..`，不解析符号链接。只用于内部固定组件拼接；
+/// 用户输入在 [`AbsPath::new`] 中已被拒绝包含 `..`。
 fn clean(path: &Path) -> PathBuf {
     let mut cleaned = PathBuf::new();
     for component in path.components() {
@@ -348,29 +328,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cleans_dot_and_parent_components() {
-        let path = AbsPath::new("/tmp/a/./b/../c").unwrap();
-        assert_eq!(path.as_path(), Path::new("/tmp/a/c"));
+    fn cleans_dot_components() {
+        let path = AbsPath::new("/tmp/a/./b/c").unwrap();
+        assert_eq!(path.as_path(), Path::new("/tmp/a/b/c"));
     }
 
     #[test]
-    fn parent_at_root_stays_at_root() {
-        let path = AbsPath::new("/../..").unwrap();
-        assert_eq!(path.as_path(), Path::new("/"));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn symlinked_parent_traversal_is_refused() {
-        let temporary = std::env::temp_dir().join(format!("bakon-path-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&temporary);
-        std::fs::create_dir_all(temporary.join("real")).unwrap();
-        std::fs::write(temporary.join("real/x"), b"x").unwrap();
-        std::os::unix::fs::symlink(temporary.join("real"), temporary.join("link")).unwrap();
-
-        let error = AbsPath::new(temporary.join("link/../x")).unwrap_err();
-        assert!(matches!(error, Error::Usage(_)));
-        std::fs::remove_dir_all(&temporary).unwrap();
+    fn refuses_parent_components() {
+        for value in ["/tmp/a/../b", "/..", "relative/../x", "/tmp/a/./.."] {
+            let error = AbsPath::new(value).unwrap_err();
+            assert!(matches!(error, Error::Usage(_)), "{value}: {error}");
+            assert_eq!(error.exit_code(), 2);
+        }
     }
 
     #[test]

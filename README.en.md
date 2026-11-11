@@ -792,7 +792,7 @@ Confirm the `salvage` or `revert` entry exists.
 | Exit 8 | Permission or general I/O error | Check directory permissions and disk health |
 | Exit 9 | Version written and visible, but the parent directory `fsync` failed, so durability is unconfirmed | Do not retry blindly; use `bakon log` / `bakon verify` to confirm the visible state and back up; a power loss may lose that version |
 | `path is not valid UTF-8` | The target path is not UTF-8 | Use a UTF-8 path; bakon stores paths as text |
-| `path traverses a symbolic link before '..'` | `..` follows a symlink, so the real target is ambiguous | Use a resolved absolute path without `..` |
+| `path contains '..'` | The path contains `..`; lexical folding can differ from kernel resolution | Use a resolved absolute path without `..` |
 
 Scripts should rely on exit codes and `--format json` output, not on error message text.
 

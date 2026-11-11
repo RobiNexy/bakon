@@ -66,6 +66,8 @@ store/
 
 路径默认 `~/.bakon/store`；优先级为 `--store` > `BAKON_STORE` > 配置 `store` > `BAKON_HOME/store` > `~/.bakon/store`，见 [[OPS__store-identity-recovery-and-retention]] §1。0.x 的 `repo/` 不被读取也不被修改。
 
+Unix 上新建的存储根与布局目录为 `0700`，清单、对象、索引、`.pending`、`.lock` 与原子写临时文件为 `0600`；`open` 不修改已存在目录的权限。存储不加密，机密性边界依赖这些权限与宿主机的访问控制。
+
 格式定义与字段语义见 [[DATA__version-manifest-and-numbering]]；写入顺序见 [[DATA__blob-store-and-durability]]。
 
 ## 5. 关键算法
@@ -136,7 +138,7 @@ store/
 | `log`、`show`、`diff`、`ls`、`verify` | 共享 |
 | 编辑器会话 | 无 |
 
-`fs2` 的 `lock_exclusive` / `lock_shared` 是阻塞调用；超时用「尝试获取 + 退避」实现，默认 2 秒。锁文件内容记录 pid 与起始时间，仅用于错误消息。
+锁由两个不互通的具体类型承载：`begin_write`/`begin_verify` 返回 `WriteLock`，`lock_shared` 返回 `ReadLock`；所有写接口都要求 `&WriteLock`。标准库的 `File::try_lock` / `try_lock_shared` 是尝试调用；超时用「尝试获取 + 退避」实现，默认 2 秒。锁文件内容记录 pid，仅用于错误消息。
 
 `edit` 的冲突检测：进入编辑器前记录 `(id, head_ver, content_hash)`，提交前在锁内比较 `head_ver`；不一致返回 `HeadChanged`，保留磁盘上的编辑结果，提示重新执行。这一机制替代了 0.x「整段会话持锁」的做法，使第二个写者不会无限阻塞。
 
@@ -147,6 +149,7 @@ store/
 | 身份不混用 | `FileId`、`Ver`、`AbsPath`、`BlobHash` 四个 newtype，无 `From` 互通 |
 | 编号只能递增 | `Ver::next(head)` 为唯一构造器；清单反序列化时校验严格递增 |
 | 破坏性写后置 | `apply` 仅定义在 `Committed` 上；`Prepared` 无法触达目标文件 |
+| 写锁不可绕过 | `ReadLock`/`WriteLock` 为不互通类型，写接口要求 `&WriteLock`；字段私有，不能伪造 |
 | 保留三态 | `Retention::{Inherit, Unlimited, Limit}`，JSON 映射为 缺省/0/n |
 | 版本事实唯一来源 | 版本只能从 `Manifest` 读取；`Ver` 无 `FromStr` |
 | 错误到退出码 | `Error::exit_code`，穷尽匹配 |

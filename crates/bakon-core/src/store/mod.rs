@@ -7,7 +7,7 @@ mod marker;
 mod verify;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -124,8 +124,8 @@ impl Committed {
         self.trim_failed
     }
 
-    /// 只有已提交的版本才能写回目标文件。
-    pub fn apply(self, store: &Store, target: &AbsPath) -> Result<()> {
+    /// 只有已提交的版本才能写回目标文件；调用方必须持有写锁。
+    pub fn apply(self, _lock: &WriteLock, store: &Store, target: &AbsPath) -> Result<()> {
         let manifest = store.manifest(self.id)?;
         let record = manifest
             .find(self.version)
@@ -161,7 +161,7 @@ impl Store {
             }
             Ok(_) => Err(Error::NotAStore { root }),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                fs::create_dir_all(root.as_path()).map_err(Error::Io)?;
+                crate::fsutil::create_private_dir_all(root.as_path())?;
                 let marker = initialize(&root)?;
                 Ok((Self::compose(root, marker), true))
             }
@@ -216,20 +216,20 @@ impl Store {
     }
 
     /// 取得排他写锁，并执行恢复动作（清理暂存、检查待写回标记）。
-    pub fn begin_write(&mut self, timeout: Duration) -> Result<StoreLock> {
+    pub fn begin_write(&mut self, timeout: Duration) -> Result<WriteLock> {
         let guard = self.begin_verify(timeout)?;
-        self.recover()?;
+        self.recover(&guard)?;
         Ok(guard)
     }
 
     /// 取得排他锁但不自动恢复；`verify --fix` 在自己的报告流程里处理 `.pending`。
-    pub fn begin_verify(&self, timeout: Duration) -> Result<StoreLock> {
-        self.acquire(true, timeout)
+    pub fn begin_verify(&self, timeout: Duration) -> Result<WriteLock> {
+        self.acquire_exclusive(timeout)
     }
 
     /// 取得共享读锁。
-    pub fn lock_shared(&self, timeout: Duration) -> Result<StoreLock> {
-        self.acquire(false, timeout)
+    pub fn lock_shared(&self, timeout: Duration) -> Result<ReadLock> {
+        self.acquire_shared(timeout)
     }
 
     /// 路径 → 身份；缓存未命中时扫描清单并修复缓存。
@@ -279,8 +279,8 @@ impl Store {
         }
     }
 
-    /// 为已存在的版本构造写回句柄。
-    pub fn committed(&self, id: FileId, version: Ver) -> Result<Committed> {
+    /// 为已存在的版本构造写回句柄；调用方必须持有写锁。
+    pub fn committed(&self, _lock: &WriteLock, id: FileId, version: Ver) -> Result<Committed> {
         let manifest = self.manifest(id)?;
         let record = manifest.find(version).ok_or_else(|| Error::NoSuchVersion {
             ver: version,
@@ -299,8 +299,13 @@ impl Store {
         Ok(self.manifest(id)?.head().cloned())
     }
 
-    /// 构造纳管提交：生成身份与基线版本。调用方必须持有写锁。
-    pub fn prepare_track(&self, path: &AbsPath, content: &[u8]) -> Result<Prepared> {
+    /// 构造纳管提交：生成身份与基线版本。
+    pub fn prepare_track(
+        &self,
+        _lock: &WriteLock,
+        path: &AbsPath,
+        content: &[u8],
+    ) -> Result<Prepared> {
         let id = self.next_file_id()?;
         let baseline = VersionRecord::new(
             Ver::ZERO,
@@ -316,8 +321,14 @@ impl Store {
         })
     }
 
-    /// 构造追加提交；版本号与时间在这里生成。调用方必须持有写锁。
-    pub fn prepare_commit(&self, id: FileId, content: &[u8], source: Source) -> Result<Prepared> {
+    /// 构造追加提交；版本号与时间在这里生成。
+    pub fn prepare_commit(
+        &self,
+        _lock: &WriteLock,
+        id: FileId,
+        content: &[u8],
+        source: Source,
+    ) -> Result<Prepared> {
         let mut manifest = self.manifest(id)?;
         let head = manifest.max_ver().ok_or_else(|| Error::Corrupt {
             what: "manifest",
@@ -341,7 +352,12 @@ impl Store {
     /// 持久化提交：先写对象，再原子替换清单，最后更新派生缓存。
     ///
     /// `expected_head` 是调用方在进入编辑器前读到的 head；不一致即冲突退出。
-    pub fn commit(&mut self, prepared: Prepared, expected_head: Option<Ver>) -> Result<Committed> {
+    pub fn commit(
+        &mut self,
+        lock: &WriteLock,
+        prepared: Prepared,
+        expected_head: Option<Ver>,
+    ) -> Result<Committed> {
         let id = prepared.manifest.id;
         if expected_head.is_none() && self.resolve(&prepared.manifest.path)?.is_some() {
             return Err(Error::AlreadyManaged {
@@ -397,12 +413,12 @@ impl Store {
             .unwrap_or_default();
 
         self.objects.put(&prepared.content)?;
-        self.save_manifest(&prepared.manifest)?;
-        self.remember(&prepared.manifest);
+        self.save_manifest(lock, &prepared.manifest)?;
+        self.remember(lock, &prepared.manifest);
 
         // 裁剪已经作为清单提交的一部分生效；对象回收失败时保留孤儿，
         // 由 verify --fix 或下一次 prune 收敛，不回滚已提交的版本。
-        let trim_failed = !removed.is_empty() && self.reclaim_removed(&removed).is_err();
+        let trim_failed = !removed.is_empty() && self.reclaim_removed(lock, &removed).is_err();
 
         Ok(Committed {
             id,
@@ -442,7 +458,7 @@ impl Store {
         Ok(Some(manifest))
     }
 
-    pub(crate) fn save_manifest(&self, manifest: &Manifest) -> Result<()> {
+    pub(crate) fn save_manifest(&self, _lock: &WriteLock, manifest: &Manifest) -> Result<()> {
         let encoded = serde_json::to_vec_pretty(manifest)
             .map_err(|error| Error::Internal(format!("cannot encode manifest: {error}")))?;
         let files = self.root.join(FILES_DIR);
@@ -489,7 +505,7 @@ impl Store {
     }
 
     /// 只改路径映射，不动磁盘文件。
-    pub fn rename(&mut self, id: FileId, new_path: AbsPath) -> Result<()> {
+    pub fn rename(&mut self, lock: &WriteLock, id: FileId, new_path: AbsPath) -> Result<()> {
         let mut manifest = self.manifest(id)?;
         if manifest.path.key() == new_path.key() {
             return Ok(());
@@ -499,7 +515,7 @@ impl Store {
         }
 
         manifest.path = new_path;
-        self.save_manifest(&manifest)?;
+        self.save_manifest(lock, &manifest)?;
 
         let keep = manifest.path.key();
         let stale: Vec<String> = self
@@ -512,21 +528,41 @@ impl Store {
         for key in stale {
             self.index_cache().entries.remove(&key);
         }
-        self.remember(&manifest);
+        self.remember(lock, &manifest);
         Ok(())
     }
 
     /// 设置或清除该文件的变更钩子。
-    pub fn set_hook(&self, id: FileId, hook: Option<String>) -> Result<()> {
+    pub fn set_hook(&self, lock: &WriteLock, id: FileId, hook: Option<String>) -> Result<()> {
         let mut manifest = self.manifest(id)?;
         manifest.hook = hook;
-        self.save_manifest(&manifest)
+        self.save_manifest(lock, &manifest)
     }
 
     /// 按生效上限裁剪，并回收不再被任何清单引用的对象。
-    ///
-    /// `dry_run` 只报告，不移动对象、不写清单。调用方必须持有排他锁。
-    pub fn prune(&mut self, ids: &[FileId], dry_run: bool) -> Result<PruneReport> {
+    pub fn prune(&mut self, lock: &WriteLock, ids: &[FileId]) -> Result<PruneReport> {
+        self.prune_inner(Some(lock), ids, false)
+    }
+
+    /// `--dry-run` 只报告，不移动对象、不写清单；调用方持共享锁。
+    pub fn prune_dry_run(&mut self, ids: &[FileId]) -> Result<PruneReport> {
+        self.prune_inner(None, ids, true)
+    }
+
+    fn prune_inner(
+        &mut self,
+        lock: Option<&WriteLock>,
+        ids: &[FileId],
+        dry_run: bool,
+    ) -> Result<PruneReport> {
+        let lock =
+            if dry_run {
+                None
+            } else {
+                Some(lock.ok_or_else(|| {
+                    Error::Internal("prune write path requires a write lock".into())
+                })?)
+            };
         let unique: Vec<FileId> = ids
             .iter()
             .copied()
@@ -550,7 +586,7 @@ impl Store {
         if !needs_trim {
             if !dry_run && selected.len() == all_ids.len() {
                 // 全库 prune 仍负责回收崩溃留下的孤儿。
-                self.reclaim_orphans()?;
+                self.reclaim_orphans(lock.expect("write mode has a lock"))?;
             }
             return Ok(PruneReport::default());
         }
@@ -605,22 +641,22 @@ impl Store {
             }
             let mut trimmed = manifest;
             trimmed.versions.drain(..remove_count);
-            self.save_manifest(&trimmed)?;
+            self.save_manifest(lock.expect("write mode has a lock"), &trimmed)?;
 
             // 清单先行：提交后这些对象才不可达，崩溃残留最多是垃圾。
             for hash in candidates {
-                self.move_to_trash(hash)?;
+                self.move_to_trash(lock.expect("write mode has a lock"), hash)?;
             }
         }
 
         if !dry_run {
             // 兜底回收：提交裁剪、prune 崩溃或失败提交留下的孤儿对象。
-            self.reclaim_orphans()?;
+            self.reclaim_orphans(lock.expect("write mode has a lock"))?;
         }
         Ok(report)
     }
 
-    pub(crate) fn move_to_trash(&self, hash: BlobHash) -> Result<()> {
+    pub(crate) fn move_to_trash(&self, _lock: &WriteLock, hash: BlobHash) -> Result<()> {
         let from = self.objects.path(hash);
         let to = self.root.join(TRASH_DIR).join(hash.to_hex());
         match fs::rename(from.as_path(), to.as_path()) {
@@ -645,7 +681,7 @@ impl Store {
     }
 
     /// 移动被裁剪版本引用、且已无任何清单引用的对象。
-    fn reclaim_removed(&self, removed: &[VersionRecord]) -> Result<usize> {
+    fn reclaim_removed(&self, lock: &WriteLock, removed: &[VersionRecord]) -> Result<usize> {
         let candidates: BTreeSet<BlobHash> = removed.iter().map(|record| record.blob).collect();
         if candidates.is_empty() {
             return Ok(0);
@@ -654,7 +690,7 @@ impl Store {
         let mut moved = 0;
         for hash in candidates {
             if !referenced.contains(&hash) {
-                self.move_to_trash(hash)?;
+                self.move_to_trash(lock, hash)?;
                 moved += 1;
             }
         }
@@ -662,13 +698,13 @@ impl Store {
         Ok(moved)
     }
 
-    /// 回收所有不在任何清单中的对象；调用方必须持有排他锁。
-    pub(crate) fn reclaim_orphans(&self) -> Result<usize> {
+    /// 回收所有不在任何清单中的对象。
+    pub(crate) fn reclaim_orphans(&self, lock: &WriteLock) -> Result<usize> {
         let referenced = self.referenced_blobs()?;
         let mut moved = 0;
         for hash in self.objects.list_hashes()? {
             if !referenced.contains(&hash) {
-                self.move_to_trash(hash)?;
+                self.move_to_trash(lock, hash)?;
                 moved += 1;
             }
         }
@@ -710,7 +746,7 @@ impl Store {
     }
 
     /// 缓存是派生数据；写入失败不影响只读结果的正确性。
-    fn save_index(&self) -> Result<()> {
+    fn save_index(&self, _lock: &WriteLock) -> Result<()> {
         let Some(index) = self.index.as_ref() else {
             return Ok(());
         };
@@ -719,29 +755,29 @@ impl Store {
         write_atomic(&self.index_path(), &self.root, &encoded)?.require_durable()
     }
 
-    fn remember(&mut self, manifest: &Manifest) {
+    fn remember(&mut self, lock: &WriteLock, manifest: &Manifest) {
         let key = manifest.path.key();
         let entry = self.index_cache().entries.get(&key).copied();
         if entry == Some(manifest.id) {
             return;
         }
         self.index_cache().entries.insert(key, manifest.id);
-        let _ = self.save_index();
+        let _ = self.save_index(lock);
     }
 
     /// 恢复 `.pending` 中最多一条记录。
     ///
     /// 返回被证明为“从未提交”的过期记录，供 `verify --fix` 报告并丢弃。
     /// 无法证明的记录保留 `.pending` 并返回 `Corrupt`，不得猜测后继续。
-    fn recover(&mut self) -> Result<Vec<PendingEntry>> {
+    fn recover(&mut self, lock: &WriteLock) -> Result<Vec<PendingEntry>> {
         let mut stale = Vec::new();
         for entry in self.read_pending()? {
-            match self.recover_entry(&entry)? {
+            match self.recover_entry(lock, &entry)? {
                 RecoveryStep::Recovered => {}
                 RecoveryStep::Stale => stale.push(entry),
             }
         }
-        self.clear_pending()?;
+        self.clear_pending(lock)?;
         self.objects.cleanup_tmp()?;
         remove_dir_contents(self.root.join(TRASH_DIR).as_path())?;
         Ok(stale)
@@ -757,7 +793,7 @@ impl Store {
     /// 清单缺失、pending 版本不匹配、版本被裁剪或目标偏离且无法证明是 no-op 时，
     /// 保留 `.pending` 并返回损坏；只有“清单头小于记录版本”或“版本已记录且目标
     /// 已等于新内容”才判定为过期并丢弃。
-    fn recover_entry(&mut self, entry: &PendingEntry) -> Result<RecoveryStep> {
+    fn recover_entry(&mut self, lock: &WriteLock, entry: &PendingEntry) -> Result<RecoveryStep> {
         let manifest = self
             .load_manifest_optional(entry.id)?
             .ok_or_else(|| Error::Corrupt {
@@ -834,7 +870,7 @@ impl Store {
         let current_hash = current.as_ref().map(|bytes| hash_bytes(bytes));
 
         if current_hash == Some(pending.blob) {
-            self.clear_pending_version(entry.id, pending.ver)?;
+            self.clear_pending_version(lock, entry.id, pending.ver)?;
             return Ok(RecoveryStep::Recovered);
         }
 
@@ -843,8 +879,8 @@ impl Store {
             .map(|head| head.ver == pending.ver)
             .unwrap_or(false);
         if (current.is_none() || current_hash == entry.old_blob) && head_is_pending {
-            self.apply_pending(&manifest.path, &content, pending.ver)?;
-            self.clear_pending_version(entry.id, pending.ver)?;
+            self.apply_pending(lock, &manifest.path, &content, pending.ver)?;
+            self.clear_pending_version(lock, entry.id, pending.ver)?;
             return Ok(RecoveryStep::Recovered);
         }
 
@@ -858,16 +894,17 @@ impl Store {
                     && head.ver > pending.ver
             });
             if !already_salvaged {
-                let salvage = self.prepare_commit(entry.id, bytes, Source::Salvage)?;
+                let salvage = self.prepare_commit(lock, entry.id, bytes, Source::Salvage)?;
                 let expected = manifest.max_ver().ok_or_else(|| Error::Corrupt {
                     what: "manifest",
                     detail: format!("{} has no versions", entry.id),
                 })?;
-                self.commit(salvage, Some(expected))?;
+                self.commit(lock, salvage, Some(expected))?;
             }
         }
 
         self.append_revert_and_apply(
+            lock,
             entry.id,
             pending.ver,
             current_hash,
@@ -879,6 +916,7 @@ impl Store {
 
     fn append_revert_and_apply(
         &mut self,
+        lock: &WriteLock,
         id: FileId,
         pending_version: Ver,
         old_blob: Option<BlobHash>,
@@ -890,7 +928,7 @@ impl Store {
             what: "manifest",
             detail: format!("{id} has no versions"),
         })?;
-        let mut prepared = self.prepare_commit(id, content, Source::Revert)?;
+        let mut prepared = self.prepare_commit(lock, id, content, Source::Revert)?;
         prepared.set_pending(true);
         prepared.clear_pending(pending_version);
         let new_version = prepared
@@ -901,18 +939,27 @@ impl Store {
                 detail: format!("{id} has no versions"),
             })?
             .ver;
-        self.write_pending(&[PendingEntry {
-            id,
-            version: new_version,
-            old_blob,
-            new_blob: hash_bytes(content),
-        }])?;
-        self.commit(prepared, Some(expected))?;
-        self.apply_pending(path, content, new_version)?;
-        self.finish_apply(id)
+        self.write_pending(
+            lock,
+            &[PendingEntry {
+                id,
+                version: new_version,
+                old_blob,
+                new_blob: hash_bytes(content),
+            }],
+        )?;
+        self.commit(lock, prepared, Some(expected))?;
+        self.apply_pending(lock, path, content, new_version)?;
+        self.finish_apply(lock, id)
     }
 
-    fn apply_pending(&self, path: &AbsPath, content: &[u8], version: Ver) -> Result<()> {
+    fn apply_pending(
+        &self,
+        _lock: &WriteLock,
+        path: &AbsPath,
+        content: &[u8],
+        version: Ver,
+    ) -> Result<()> {
         crate::apply::write_target(path, content).map_err(|error| match error {
             Error::Io(source) => Error::ApplyFailed {
                 ver: version,
@@ -929,7 +976,7 @@ impl Store {
         })
     }
 
-    fn clear_pending_version(&self, id: FileId, version: Ver) -> Result<()> {
+    fn clear_pending_version(&self, lock: &WriteLock, id: FileId, version: Ver) -> Result<()> {
         let mut manifest = self.manifest(id)?;
         if let Some(record) = manifest
             .versions
@@ -938,7 +985,7 @@ impl Store {
             && record.pending_apply
         {
             record.pending_apply = false;
-            self.save_manifest(&manifest)?;
+            self.save_manifest(lock, &manifest)?;
         }
         Ok(())
     }
@@ -981,7 +1028,7 @@ impl Store {
         Ok(file.entries)
     }
 
-    fn write_pending(&self, entries: &[PendingEntry]) -> Result<()> {
+    fn write_pending(&self, _lock: &WriteLock, entries: &[PendingEntry]) -> Result<()> {
         let file = PendingFile {
             schema: SUPPORTED_SCHEMA,
             entries: entries.to_vec(),
@@ -991,7 +1038,7 @@ impl Store {
         write_atomic(&self.pending_path(), &self.root, &encoded)?.require_durable()
     }
 
-    fn clear_pending(&self) -> Result<()> {
+    fn clear_pending(&self, _lock: &WriteLock) -> Result<()> {
         match fs::remove_file(self.pending_path().as_path()) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -1002,34 +1049,46 @@ impl Store {
     /// 标记一次写回开始；必须先于「pending=1 的清单提交」。
     pub fn begin_apply(
         &self,
+        lock: &WriteLock,
         id: FileId,
         version: Ver,
         old_blob: Option<BlobHash>,
         new_blob: BlobHash,
     ) -> Result<()> {
-        self.write_pending(&[PendingEntry {
-            id,
-            version,
-            old_blob,
-            new_blob,
-        }])
+        self.write_pending(
+            lock,
+            &[PendingEntry {
+                id,
+                version,
+                old_blob,
+                new_blob,
+            }],
+        )
     }
 
     /// 写回成功后清除清单标记与 `.pending`。
-    pub fn finish_apply(&self, id: FileId) -> Result<()> {
+    pub fn finish_apply(&self, lock: &WriteLock, id: FileId) -> Result<()> {
         let mut manifest = self.manifest(id)?;
         if let Some(head) = manifest.head_mut()
             && head.pending_apply
         {
             head.pending_apply = false;
-            self.save_manifest(&manifest)?;
+            self.save_manifest(lock, &manifest)?;
         }
-        self.clear_pending()
+        self.clear_pending(lock)
     }
 
-    fn acquire(&self, exclusive: bool, timeout: Duration) -> Result<StoreLock> {
+    fn acquire_shared(&self, timeout: Duration) -> Result<ReadLock> {
+        self.acquire(false, timeout).map(|file| ReadLock { file })
+    }
+
+    fn acquire_exclusive(&self, timeout: Duration) -> Result<WriteLock> {
+        self.acquire(true, timeout).map(|file| WriteLock { file })
+    }
+
+    fn acquire(&self, exclusive: bool, timeout: Duration) -> Result<File> {
         let path = self.root.join(LOCK_FILE);
-        let file = OpenOptions::new()
+        let file = crate::fsutil::private_file_options()
             .read(true)
             .write(true)
             .create(true)
@@ -1050,7 +1109,7 @@ impl Store {
                     if exclusive {
                         self.write_holder(&file);
                     }
-                    return Ok(StoreLock { file });
+                    return Ok(file);
                 }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                     let waited = started.elapsed();
@@ -1080,13 +1139,40 @@ impl Store {
     }
 }
 
-/// 持锁守卫；drop 时解锁。进程崩溃时内核也会释放 flock。
+/// 共享读锁；写接口不接受它。
+///
+/// ```compile_fail,E0308
+/// use std::time::Duration;
+/// use bakon_core::{AbsPath, Store};
+///
+/// # fn main() -> bakon_core::Result<()> {
+/// let temporary = std::env::temp_dir().join("bakon-read-lock-doc");
+/// let (store, _) = Store::init(&temporary)?;
+/// let read = store.lock_shared(Duration::from_millis(10))?;
+/// let path = AbsPath::new(temporary.join("target"))?;
+/// let _ = store.prepare_track(&read, &path, b"x")?;
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug)]
-pub struct StoreLock {
+pub struct ReadLock {
     file: File,
 }
 
-impl Drop for StoreLock {
+impl Drop for ReadLock {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
+}
+
+/// 排他写锁；所有写接口都要求它。只能由 [`Store::begin_write`] 或
+/// [`Store::begin_verify`] 产生，字段私有，调用方无法伪造。
+#[derive(Debug)]
+pub struct WriteLock {
+    file: File,
+}
+
+impl Drop for WriteLock {
     fn drop(&mut self) {
         let _ = self.file.unlock();
     }
@@ -1145,7 +1231,7 @@ fn initialize(root: &AbsPath) -> Result<Marker> {
 /// 创建缺失的子目录；已有的目录保持不变。
 fn ensure_layout(root: &AbsPath) -> Result<()> {
     for directory in LAYOUT_DIRS {
-        fs::create_dir_all(root.join(directory).as_path()).map_err(Error::Io)?;
+        crate::fsutil::create_private_dir_all(root.join(directory).as_path())?;
     }
     crate::fsutil::fsync_dir(root.as_path())
 }
@@ -1246,6 +1332,10 @@ mod tests {
         AbsPath::new(format!("/tmp/bakon-tests/{name}")).unwrap()
     }
 
+    fn write_lock(store: &mut Store) -> WriteLock {
+        store.begin_write(Duration::from_millis(50)).unwrap()
+    }
+
     #[test]
     fn init_creates_marker_and_layout() {
         let temporary = TempDir::new().unwrap();
@@ -1263,6 +1353,43 @@ mod tests {
         }
         assert_eq!(store.marker().schema, SUPPORTED_SCHEMA);
         store.marker().validate().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn store_layout_and_records_are_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temporary = TempDir::new().unwrap();
+        let root = temporary.path().join("store");
+        let (mut store, _) = Store::init(&root).unwrap();
+        let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+
+        assert_eq!(mode(&root), 0o700);
+        for directory in LAYOUT_DIRS {
+            assert_eq!(mode(&root.join(directory)), 0o700, "{directory}");
+        }
+        assert_eq!(mode(&root.join(MARKER_FILE)), 0o600);
+
+        let guard = store.begin_write(Duration::from_millis(50)).unwrap();
+        assert_eq!(mode(&root.join(LOCK_FILE)), 0o600);
+
+        let file = temporary.path().join("target");
+        fs::write(&file, b"secret").unwrap();
+        let target = AbsPath::new(&file).unwrap();
+        let prepared = store.prepare_track(&guard, &target, b"secret").unwrap();
+        let committed = store.commit(&guard, prepared, None).unwrap();
+        assert_eq!(mode(store.manifest_path(committed.id()).as_path()), 0o600);
+
+        let record = store
+            .manifest(committed.id())
+            .unwrap()
+            .head()
+            .unwrap()
+            .clone();
+        let object = store.objects().path(record.blob);
+        assert_eq!(mode(object.as_path()), 0o600);
+        assert_eq!(mode(object.as_path().parent().unwrap()), 0o700);
     }
 
     #[test]
@@ -1379,16 +1506,17 @@ mod tests {
     #[test]
     fn tracking_then_committing_builds_a_history() {
         let (_temporary, mut store) = open_store();
+        let lock = write_lock(&mut store);
         let file = path("config");
 
-        let baseline = store.prepare_track(&file, b"one").unwrap();
-        let committed = store.commit(baseline, None).unwrap();
+        let baseline = store.prepare_track(&lock, &file, b"one").unwrap();
+        let committed = store.commit(&lock, baseline, None).unwrap();
         assert_eq!(committed.version(), Ver::ZERO);
 
         let next = store
-            .prepare_commit(committed.id(), b"two", Source::Edit)
+            .prepare_commit(&lock, committed.id(), b"two", Source::Edit)
             .unwrap();
-        let committed = store.commit(next, Some(Ver::ZERO)).unwrap();
+        let committed = store.commit(&lock, next, Some(Ver::ZERO)).unwrap();
         assert_eq!(committed.version().get(), 1);
 
         let manifest = store.manifest(committed.id()).unwrap();
@@ -1401,12 +1529,13 @@ mod tests {
     #[test]
     fn commit_refuses_a_duplicate_tracked_path() {
         let (_temporary, mut store) = open_store();
+        let lock = write_lock(&mut store);
         let file = path("duplicate-track");
-        let first = store.prepare_track(&file, b"one").unwrap();
-        store.commit(first, None).unwrap();
-        let second = store.prepare_track(&file, b"two").unwrap();
+        let first = store.prepare_track(&lock, &file, b"one").unwrap();
+        store.commit(&lock, first, None).unwrap();
+        let second = store.prepare_track(&lock, &file, b"two").unwrap();
 
-        let error = store.commit(second, None).unwrap_err();
+        let error = store.commit(&lock, second, None).unwrap_err();
 
         assert!(matches!(error, Error::AlreadyManaged { .. }));
         assert_eq!(error.exit_code(), 4);
@@ -1416,19 +1545,20 @@ mod tests {
     #[test]
     fn commit_conflict_keeps_the_old_manifest() {
         let (_temporary, mut store) = open_store();
+        let lock = write_lock(&mut store);
         let file = path("conflict");
-        let baseline = store.prepare_track(&file, b"base").unwrap();
-        let committed = store.commit(baseline, None).unwrap();
+        let baseline = store.prepare_track(&lock, &file, b"base").unwrap();
+        let committed = store.commit(&lock, baseline, None).unwrap();
 
         let first = store
-            .prepare_commit(committed.id(), b"first", Source::Edit)
+            .prepare_commit(&lock, committed.id(), b"first", Source::Edit)
             .unwrap();
-        store.commit(first, Some(Ver::ZERO)).unwrap();
+        store.commit(&lock, first, Some(Ver::ZERO)).unwrap();
 
         let stale = store
-            .prepare_commit(committed.id(), b"stale", Source::Edit)
+            .prepare_commit(&lock, committed.id(), b"stale", Source::Edit)
             .unwrap();
-        let error = store.commit(stale, Some(Ver::ZERO)).unwrap_err();
+        let error = store.commit(&lock, stale, Some(Ver::ZERO)).unwrap_err();
 
         assert!(matches!(error, Error::HeadChanged { expected, actual }
             if expected == Ver::ZERO && actual.get() == 1));
@@ -1439,9 +1569,10 @@ mod tests {
     #[test]
     fn resolve_uses_and_repairs_the_cache() {
         let (_temporary, mut store) = open_store();
+        let lock = write_lock(&mut store);
         let file = path("resolved");
-        let baseline = store.prepare_track(&file, b"content").unwrap();
-        let committed = store.commit(baseline, None).unwrap();
+        let baseline = store.prepare_track(&lock, &file, b"content").unwrap();
+        let committed = store.commit(&lock, baseline, None).unwrap();
 
         assert_eq!(store.resolve(&file).unwrap(), Some(committed.id()));
 
@@ -1450,10 +1581,13 @@ mod tests {
         assert_eq!(store.resolve(&file).unwrap(), Some(committed.id()));
 
         let report = store
-            .verify(VerifyOptions {
-                fix: true,
-                size: false,
-            })
+            .verify_fix(
+                &lock,
+                VerifyOptions {
+                    fix: true,
+                    size: false,
+                },
+            )
             .unwrap();
         assert!(report.ok());
         let index = fs::read_to_string(store.index_path().as_path()).unwrap();
@@ -1469,9 +1603,10 @@ mod tests {
     #[test]
     fn a_corrupt_manifest_is_reported_not_skipped() {
         let (_temporary, mut store) = open_store();
+        let lock = write_lock(&mut store);
         let file = path("corrupt");
-        let baseline = store.prepare_track(&file, b"content").unwrap();
-        let committed = store.commit(baseline, None).unwrap();
+        let baseline = store.prepare_track(&lock, &file, b"content").unwrap();
+        let committed = store.commit(&lock, baseline, None).unwrap();
 
         let manifest_path = store.manifest_path(committed.id());
         fs::write(manifest_path.as_path(), b"{").unwrap();
@@ -1483,21 +1618,27 @@ mod tests {
     #[test]
     fn trim_runs_during_commit() {
         let (_temporary, mut store) = open_store();
+        let lock = write_lock(&mut store);
         let file = path("trimmed");
-        let baseline = store.prepare_track(&file, b"v0").unwrap();
-        let committed = store.commit(baseline, None).unwrap();
+        let baseline = store.prepare_track(&lock, &file, b"v0").unwrap();
+        let committed = store.commit(&lock, baseline, None).unwrap();
 
         let mut manifest = store.manifest(committed.id()).unwrap();
         manifest.retention =
             crate::manifest::Retention::Limit(std::num::NonZeroU32::new(2).unwrap());
-        store.save_manifest(&manifest).unwrap();
+        store.save_manifest(&lock, &manifest).unwrap();
 
         let mut head = committed.version();
         for index in 1..5 {
             let prepared = store
-                .prepare_commit(committed.id(), format!("v{index}").as_bytes(), Source::Edit)
+                .prepare_commit(
+                    &lock,
+                    committed.id(),
+                    format!("v{index}").as_bytes(),
+                    Source::Edit,
+                )
                 .unwrap();
-            store.commit(prepared, Some(head)).unwrap();
+            store.commit(&lock, prepared, Some(head)).unwrap();
             head = Ver::new(index).unwrap();
         }
 
@@ -1551,9 +1692,10 @@ mod tests {
     #[test]
     fn verify_detects_and_fixes_orphan_objects() {
         let (_temporary, mut store) = open_store();
+        let lock = write_lock(&mut store);
         let file = path("kept");
-        let baseline = store.prepare_track(&file, b"keep").unwrap();
-        store.commit(baseline, None).unwrap();
+        let baseline = store.prepare_track(&lock, &file, b"keep").unwrap();
+        store.commit(&lock, baseline, None).unwrap();
         store.objects.put(b"orphan").unwrap();
 
         let report = store
@@ -1569,10 +1711,13 @@ mod tests {
         );
 
         let report = store
-            .verify(VerifyOptions {
-                fix: true,
-                size: false,
-            })
+            .verify_fix(
+                &lock,
+                VerifyOptions {
+                    fix: true,
+                    size: false,
+                },
+            )
             .unwrap();
         assert!(report.ok());
         assert!(store.orphan_hashes().unwrap().is_empty());
@@ -1581,17 +1726,18 @@ mod tests {
     #[test]
     fn prune_accepts_duplicate_ids() {
         let (_temporary, mut store) = open_store();
+        let lock = write_lock(&mut store);
         let file = path("duplicate-prune");
-        let baseline = store.prepare_track(&file, b"one").unwrap();
-        let committed = store.commit(baseline, None).unwrap();
+        let baseline = store.prepare_track(&lock, &file, b"one").unwrap();
+        let committed = store.commit(&lock, baseline, None).unwrap();
         let next = store
-            .prepare_commit(committed.id(), b"two", Source::Edit)
+            .prepare_commit(&lock, committed.id(), b"two", Source::Edit)
             .unwrap();
-        store.commit(next, Some(Ver::ZERO)).unwrap();
+        store.commit(&lock, next, Some(Ver::ZERO)).unwrap();
         store.set_default_max_versions(1);
 
         let report = store
-            .prune(&[committed.id(), committed.id()], false)
+            .prune(&lock, &[committed.id(), committed.id()])
             .unwrap();
 
         assert_eq!(report.files.len(), 1);
@@ -1603,19 +1749,20 @@ mod tests {
     #[test]
     fn prune_without_trim_does_not_read_other_manifests() {
         let (_temporary, mut store) = open_store();
+        let lock = write_lock(&mut store);
         let first = path("first");
         let second = path("second");
         let first_commit = {
-            let prepared = store.prepare_track(&first, b"one").unwrap();
-            store.commit(prepared, None).unwrap()
+            let prepared = store.prepare_track(&lock, &first, b"one").unwrap();
+            store.commit(&lock, prepared, None).unwrap()
         };
         let second_commit = {
-            let prepared = store.prepare_track(&second, b"two").unwrap();
-            store.commit(prepared, None).unwrap()
+            let prepared = store.prepare_track(&lock, &second, b"two").unwrap();
+            store.commit(&lock, prepared, None).unwrap()
         };
 
         fs::write(store.manifest_path(second_commit.id()).as_path(), b"{").unwrap();
-        let report = store.prune(&[first_commit.id()], false).unwrap();
+        let report = store.prune(&lock, &[first_commit.id()]).unwrap();
         assert!(report.files.is_empty());
     }
 
@@ -1664,12 +1811,14 @@ mod tests {
         let file = temporary.path().join("target");
         fs::write(&file, b"old").unwrap();
         let tracked = AbsPath::new(&file).unwrap();
+        let lock = write_lock(&mut store);
 
-        let baseline = store.prepare_track(&tracked, b"old").unwrap();
-        let committed = store.commit(baseline, None).unwrap();
+        let baseline = store.prepare_track(&lock, &tracked, b"old").unwrap();
+        let committed = store.commit(&lock, baseline, None).unwrap();
 
         store
             .begin_apply(
+                &lock,
                 committed.id(),
                 Ver::new(1).unwrap(),
                 Some(hash_bytes(b"old")),
@@ -1677,10 +1826,11 @@ mod tests {
             )
             .unwrap();
         let mut prepared = store
-            .prepare_commit(committed.id(), b"restored", Source::Revert)
+            .prepare_commit(&lock, committed.id(), b"restored", Source::Revert)
             .unwrap();
         prepared.set_pending(true);
-        store.commit(prepared, Some(Ver::ZERO)).unwrap();
+        store.commit(&lock, prepared, Some(Ver::ZERO)).unwrap();
+        drop(lock);
         drop(store);
 
         let (mut store, _) = Store::init(&root).unwrap();
@@ -1701,17 +1851,21 @@ mod tests {
     #[test]
     fn recovery_keeps_a_pending_record_for_a_missing_manifest() {
         let (_temporary, mut store) = open_store();
+        let lock = store.begin_verify(Duration::from_millis(50)).unwrap();
         let id = FileId::from_bytes([9; 16]);
         store
-            .write_pending(&[PendingEntry {
-                id,
-                version: Ver::new(1).unwrap(),
-                old_blob: None,
-                new_blob: hash_bytes(b"lost"),
-            }])
+            .write_pending(
+                &lock,
+                &[PendingEntry {
+                    id,
+                    version: Ver::new(1).unwrap(),
+                    old_blob: None,
+                    new_blob: hash_bytes(b"lost"),
+                }],
+            )
             .unwrap();
 
-        let error = store.recover().unwrap_err();
+        let error = store.recover(&lock).unwrap_err();
 
         assert!(matches!(error, Error::Corrupt { .. }));
         assert_eq!(error.exit_code(), 6);
@@ -1721,19 +1875,23 @@ mod tests {
     #[test]
     fn recovery_discards_an_uncommitted_pending_record() {
         let (_temporary, mut store) = open_store();
+        let lock = write_lock(&mut store);
         let file = path("uncommitted");
-        let prepared = store.prepare_track(&file, b"one").unwrap();
-        let committed = store.commit(prepared, None).unwrap();
+        let prepared = store.prepare_track(&lock, &file, b"one").unwrap();
+        let committed = store.commit(&lock, prepared, None).unwrap();
         store
-            .write_pending(&[PendingEntry {
-                id: committed.id(),
-                version: Ver::new(1).unwrap(),
-                old_blob: Some(hash_bytes(b"one")),
-                new_blob: hash_bytes(b"two"),
-            }])
+            .write_pending(
+                &lock,
+                &[PendingEntry {
+                    id: committed.id(),
+                    version: Ver::new(1).unwrap(),
+                    old_blob: Some(hash_bytes(b"one")),
+                    new_blob: hash_bytes(b"two"),
+                }],
+            )
             .unwrap();
 
-        let stale = store.recover().unwrap();
+        let stale = store.recover(&lock).unwrap();
 
         assert_eq!(stale.len(), 1);
         assert_eq!(stale[0].version, Ver::new(1).unwrap());
@@ -1744,23 +1902,30 @@ mod tests {
     #[test]
     fn verify_fix_reports_and_discards_an_uncommitted_pending_record() {
         let (_temporary, mut store) = open_store();
+        let lock = write_lock(&mut store);
         let file = path("verify-uncommitted");
-        let prepared = store.prepare_track(&file, b"one").unwrap();
-        let committed = store.commit(prepared, None).unwrap();
+        let prepared = store.prepare_track(&lock, &file, b"one").unwrap();
+        let committed = store.commit(&lock, prepared, None).unwrap();
         store
-            .write_pending(&[PendingEntry {
-                id: committed.id(),
-                version: Ver::new(1).unwrap(),
-                old_blob: Some(hash_bytes(b"one")),
-                new_blob: hash_bytes(b"two"),
-            }])
+            .write_pending(
+                &lock,
+                &[PendingEntry {
+                    id: committed.id(),
+                    version: Ver::new(1).unwrap(),
+                    old_blob: Some(hash_bytes(b"one")),
+                    new_blob: hash_bytes(b"two"),
+                }],
+            )
             .unwrap();
 
         let report = store
-            .verify(VerifyOptions {
-                fix: true,
-                size: false,
-            })
+            .verify_fix(
+                &lock,
+                VerifyOptions {
+                    fix: true,
+                    size: false,
+                },
+            )
             .unwrap();
 
         assert!(

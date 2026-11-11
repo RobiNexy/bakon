@@ -15,7 +15,7 @@ pub struct BlobHash([u8; 32]);    // 内容哈希
 
 - `FileId` 不能从路径构造，只能由 `FileId::generate()` 产生并通过唯一性检查写入。
 - `Ver::next(head)` 是唯一的递增方式；不存在「从字符串解析版本号」的入口。
-- `AbsPath` 在构造时绝对化、拒绝经过符号链接的 `..`，并做词法清理；最终目标的符号链接保留。大小写不敏感平台用路径键比较身份。
+- `AbsPath` 在构造时绝对化、拒绝任何 `..`，并清理 `.`；最终目标的符号链接保留。`..` 的词法折叠与内核解析在普通文件或缺失前缀后不一致，因此必须在进入存储前由用户规范化。大小写不敏感平台用路径键比较身份。
 - 四个类型之间没有隐式转换，编译期阻止混用。
 
 ```rust
@@ -32,23 +32,23 @@ pub struct Committed { id: FileId, version: Ver }
 
 impl Store {
     /// 构造纳管提交：生成身份与基线版本。
-    pub fn prepare_track(&self, path: &AbsPath, content: &[u8]) -> Result<Prepared>;
+    pub fn prepare_track(&self, lock: &WriteLock, path: &AbsPath, content: &[u8]) -> Result<Prepared>;
 
     /// 构造追加提交：版本号与时间在这里生成。
-    pub fn prepare_commit(&self, id: FileId, content: &[u8], source: Source) -> Result<Prepared>;
+    pub fn prepare_commit(&self, lock: &WriteLock, id: FileId, content: &[u8], source: Source) -> Result<Prepared>;
 
     /// 写入对象与清单，返回提交结果。失败时持久状态或为旧值或为新值。
     /// `expected_head` 是进入编辑器前读到的 head；不一致即冲突退出。
-    pub fn commit(&mut self, prepared: Prepared, expected_head: Option<Ver>) -> Result<Committed>;
+    pub fn commit(&mut self, lock: &WriteLock, prepared: Prepared, expected_head: Option<Ver>) -> Result<Committed>;
 }
 
 impl Committed {
-    /// 只有已提交的版本才能写回目标文件（M2）。
-    pub fn apply(self, store: &Store, target: &AbsPath) -> Result<()>;
+    /// 只有已提交的版本才能写回目标文件（M2）；必须持有写锁。
+    pub fn apply(self, lock: &WriteLock, store: &Store, target: &AbsPath) -> Result<()>;
 }
 ```
 
-`apply` 只存在于 `Committed` 上，因此「写回先于提交」在类型层面不可表达，对应 $\mathbf{S_6}$。
+`apply` 只存在于 `Committed` 上，因此「写回先于提交」在类型层面不可表达。`ReadLock` 与 `WriteLock` 是两个不互通的具体类型，所有写接口都要求 `&WriteLock`；只持共享锁或完全未持锁的调用无法编译，对应 $\mathbf{S_6}$ 与 $\mathbf{S_{10}}$。`WriteLock` 的字段私有，只能由 `begin_write`/`begin_verify` 产生。
 
 ## 3. 存储接口
 
@@ -60,14 +60,20 @@ impl Committed {
 | `head(FileId) -> Option<VersionRecord>` | — | 返回最后一条版本 | 6 |
 | `content(&BlobHash) -> Vec<u8>` | 对象存在 | 解压并校验哈希 | 6（缺失、损坏） |
 | `versions(FileId) -> &[VersionRecord]` | — | 升序 | 6 |
-| `begin_write() -> WriteGuard` | — | 持排他锁并恢复 `.pending`；无法证明的记录保留并退出 6 | 4、8、6 |
-| `begin_verify() -> WriteGuard` | — | 持排他锁但不自动恢复；供 `verify --fix` 先报告再处理 `.pending` | 4、8 |
-| `commit(Prepared) -> Committed` | 持有 `WriteGuard`，head 未变；track 时路径未占用 | 追加版本、必要时裁剪 | 4（head 变化/路径已占用）、8、9（持久性未确认）、6 |
-| `prune(&[FileId]) -> PruneReport` | 持有 `WriteGuard` | 截断后缀、回收对象 | 8 |
-| `rename(FileId, AbsPath)` | 持有 `WriteGuard` | 更新清单 `path` 与缓存 | 4（目标已存在） |
-| `verify(options) -> Report` | — | 只读；`--fix` 时持排他锁 | 6、9（修复时持久性未确认） |
+| `begin_write() -> WriteLock` | — | 持排他锁并恢复 `.pending`；无法证明的记录保留并退出 6 | 4、8、6 |
+| `begin_verify() -> WriteLock` | — | 持排他锁但不自动恢复；供 `verify --fix` 先报告再处理 `.pending` | 4、8 |
+| `lock_shared() -> ReadLock` | — | 持共享锁；不能传给任何写接口 | 4、8 |
+| `commit(&WriteLock, Prepared) -> Committed` | head 未变；track 时路径未占用 | 追加版本、必要时裁剪 | 4（head 变化/路径已占用）、8、9（持久性未确认）、6 |
+| `prune(&WriteLock, &[FileId]) -> PruneReport` | 持写锁 | 截断后缀、回收对象 | 8 |
+| `prune_dry_run(&[FileId]) -> PruneReport` | 持共享锁 | 只报告，不改变持久状态 | 6 |
+| `rename(&WriteLock, FileId, AbsPath)` | 持写锁 | 更新清单 `path` 与缓存 | 4（目标已存在） |
+| `set_hook(&WriteLock, FileId, Option<String>)` | 持写锁 | 写入清单 | 8、9 |
+| `begin_apply(&WriteLock, …)` / `finish_apply(&WriteLock, FileId)` | 持写锁 | 建立/清除 `.pending` 与 pending 标记 | 8、9、6 |
+| `committed(&WriteLock, FileId, Ver) -> Committed` | 持写锁，版本存在 | 构造写回句柄 | 3、6 |
+| `verify(options) -> Report` | 持共享锁 | 只读检查 | 6 |
+| `verify_fix(&WriteLock, options) -> Report` | 持写锁 | 检查并修复派生数据 | 6、8、9（修复时持久性未确认） |
 
-读取接口持共享锁（`Store::open` 的读模式），写接口持排他锁；`edit` 的编辑器阶段不持锁，提交时用 `expected_head` 比较交换。契约细节见 [[SEQUENCE__write-protocol-and-failure-paths]]。
+读取接口持共享锁（`Store::open` 的读模式），写接口持排他锁；`edit` 的编辑器阶段不持锁，提交时用 `expected_head` 比较交换。Unix 上新建的存储根与布局目录权限为 `0700`，清单、对象、索引、`.pending`、`.lock` 与原子写临时文件为 `0600`；已存在的目录不会被 `open` 改权限。契约细节见 [[SEQUENCE__write-protocol-and-failure-paths]]。
 
 ## 4. 错误模型
 

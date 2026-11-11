@@ -70,9 +70,9 @@ $$\mathrm{projected}(S)=\{\,f\mid D(f)=\mathrm{content}(\mathrm{head}(M(f)))\,\}
 | A-04 | 公共 `prepare_track`/`commit` 不检查路径唯一，可产生两份同路径清单 | P2（已修复） | $\mathbf{P_5},\mathbf{P_9}$ |
 | A-05 | `prune` 接收重复 `FileId` 时计数下溢，debug 构建 panic | P2（已修复） | $\mathbf{P_1},\mathbf{P_6}$ |
 | A-06 | `Store::open` 等价于 `init`；读命令会在错误路径上创建存储，`verify` 还会返回 0 | P2（已修复） | $\mathbf{P_2},\mathbf{P_3}$ |
-| A-07 | `..` 前面是普通文件或缺失路径时仍按词法折叠，路径身份与内核不一致 | P2 | $\mathbf{P_7}$ |
-| A-08 | 对象与存储目录使用默认 `umask` 权限；0600 文件内容可写成 0664 对象 | P2 | $\mathbf{P_{11}}$ |
-| A-09 | `StoreLock` 不区分读写；写接口不要求 guard；`Store::committed` 可绕过 pending | P2 | $\mathbf{P_5}$ |
+| A-07 | `..` 前面是普通文件或缺失路径时仍按词法折叠，路径身份与内核不一致 | P2（已修复） | $\mathbf{P_7}$ |
+| A-08 | 对象与存储目录使用默认 `umask` 权限；0600 文件内容可写成 0664 对象 | P2（已修复） | $\mathbf{P_{11}}$ |
+| A-09 | `StoreLock` 不区分读写；写接口不要求 guard；`Store::committed` 可绕过 pending | P2（已修复） | $\mathbf{P_5}$ |
 | A-10 | 测试套件依赖 `sh`、可执行脚本与 `/tmp` 断言；Windows 全量测试不可用 | P2 | 跨平台质量门 |
 | A-11 | 一份损坏清单使 `verify` 在孤儿扫描处整体失败，已收集的报告项丢失 | P2 | $\mathbf{P_3}$ |
 | A-12 | `hook set/unset`、`config init` 忽略 `--format json`；全局 `--no-hook`/`--no-color` 未实现 | P2 | $\mathbf{P_8}$ |
@@ -93,13 +93,12 @@ $$\mathrm{projected}(S)=\{\,f\mid D(f)=\mathrm{content}(\mathrm{head}(M(f)))\,\}
 
 | 函数 | 契约 | 结论 |
 |---|---|---|
-| `AbsPath::new` | 绝对化、拒绝非 UTF-8、拒绝经过符号链接的 `..`、词法清理 | 基本成立；对普通文件/缺失前缀后的 `..` 仍折叠，见 A-07 |
-| `AbsPath::join` | 以本路径为根拼接并清理 | 仅供内部固定组件使用；不检查符号链接，不能作为公共安全构造器 |
+| `AbsPath::new` | 绝对化、拒绝非 UTF-8、拒绝任何 `..`、清理 `.` | 已修复 A-07：不再猜测内核语义，含 `..` 的输入返回用法错误 2 |
+| `AbsPath::join` | 以本路径为根拼接并清理 | 已收紧为 `pub(crate)`；仅供内部固定组件使用，不作为公共安全构造器 |
 | `AbsPath::as_path` / `Display` / `AsRef` | 只读访问 | 直接 |
 | `AbsPath::key` | 平台路径身份键 | Windows/macOS 一律小写；大小写敏感卷会误合并，跨平台未验证 |
-| `AbsPath` 的 `Serialize` / `Deserialize` | UTF-8 绝对路径 | 严格；反序列化会调用 `new`，对含 `..` 的陈旧清单可能做文件系统检查 |
-| `reject_symlinked_parent_traversal` | 拒绝符号链接后的 `..` | 对符号链接成立；对普通文件与缺失前缀不成立，见 A-07 |
-| `clean` | 词法清理 `.` 与 `..` | 不解析符号链接；是 A-07 的直接来源 |
+| `AbsPath` 的 `Serialize` / `Deserialize` | UTF-8 绝对路径 | 严格；含 `..` 的陈旧清单在反序列化时被拒绝并报告为损坏 |
+| `clean` | 词法清理 `.` 与 `..` | 只服务于内部固定组件拼接；用户输入的 `..` 在进入 `clean` 前已被拒绝 |
 | `FileId::generate` | 生成 128 位随机身份 | 随机源可用；唯一性由调用方检查，见 A-04 |
 | `FileId::as_bytes` / `to_hex` / `from_hex` | 编码与解析 | 严格小写十六进制；`from_bytes` 已收紧为测试专用 |
 | `Ver::ZERO` / `parse` / `new` / `next` / `get` | 版本号与唯一递增 | `next` 使用 `checked_add`；溢出映射为内部错误而非损坏，见 A-14 |
@@ -133,7 +132,7 @@ $$\mathrm{projected}(S)=\{\,f\mid D(f)=\mathrm{content}(\mathrm{head}(M(f)))\,\}
 | `temporary_path` | 临时文件名 | PID、序号、随机数；碰撞时 `create_new` 直接失败而不重试 |
 | `remove_dir_contents` | 清空目录但保留目录 | 不跟随符号链接；不 `fsync`；条目消失时返回错误 |
 
-临时文件的权限由 `OpenOptions` 默认值与 `umask` 决定，见 A-08。清单、索引与 pending 的临时文件位于各自目标目录，见 A-15。
+临时文件在 Unix 上显式使用 `0600`，见 A-08 的修复。清单、索引与 pending 的临时文件位于各自目标目录，见 A-15。
 
 ### 3.5 `crates/bakon-core/src/manifest.rs`
 
@@ -202,12 +201,12 @@ $$\mathrm{projected}(S)=\{\,f\mid D(f)=\mathrm{content}(\mathrm{head}(M(f)))\,\}
 
 | 函数 | 契约 | 结论 |
 |---|---|---|
-| `begin_write` | 排他锁并恢复 | 正确；恢复失败会释放锁 |
-| `begin_verify` | 排他锁但不自动恢复 | 供 `verify --fix` 先报告 `pending_stale` 再处理 `.pending` |
-| `lock_shared` | 共享锁，不恢复 | 正确；OPS 已改为“写命令启动时恢复”（O-11 已修正） |
-| `acquire` | 轮询、超时、写 holder | 基本正确；共享锁仍写打开 `.lock`，见 A-13 |
+| `begin_write` | 排他锁并恢复，返回 `WriteLock` | 正确；恢复失败会释放锁 |
+| `begin_verify` | 排他锁但不自动恢复，返回 `WriteLock` | 供 `verify --fix` 先报告 `pending_stale` 再处理 `.pending` |
+| `lock_shared` | 共享锁，不恢复，返回 `ReadLock` | 正确；OPS 已改为“写命令启动时恢复”（O-11 已修正） |
+| `acquire_shared` / `acquire_exclusive` | 轮询、超时、写 holder | 基本正确；共享锁仍写打开 `.lock`，见 A-13 |
 | `write_holder` / `read_holder` | PID 诊断 | 截断重写非原子；无开始时间，见 A-16 |
-| `StoreLock::drop` | 解锁 | 正确；内核在进程崩溃时释放 |
+| `ReadLock::drop` / `WriteLock::drop` | 解锁 | 正确；内核在进程崩溃时释放 |
 
 **读、解析与索引**
 
@@ -331,12 +330,12 @@ $$\mathrm{projected}(S)=\{\,f\mid D(f)=\mathrm{content}(\mathrm{head}(M(f)))\,\}
 
 | 编号 | 评审意见 | 判定 | 依据与修正 |
 |---|---|---|---|
-| R1 | `StoreLock` 没有区分读写 | **成立** | `StoreLock` 只有 `file`；`commit`/`rename`/`set_hook`/`begin_apply`/`finish_apply` 均不接收 guard；见 A-09 |
+| R1 | `StoreLock` 没有区分读写 | **成立（已修复）** | 审计时 `StoreLock` 只有 `file`；现在拆为 `ReadLock`/`WriteLock`，所有写接口要求 `&WriteLock`，见 A-09 |
 | R2 | `commit` 的 `_ =>` 兜底信息含糊 | **成立（低）** | 两个方向都落到“changed while tracking”；`(Some,None)` 更应是清单缺失/损坏；消息不承诺，但可改进 |
 | R3 | `resolve` 是 $O(n)$、接收 `&mut self`、不持久化索引 | **部分成立** | $O(n)$ 是缓存 miss 的文档化兜底；`&mut` 只用于内存缓存；不持久化是 V1-8 的有意修复，不是回归。没有正确性缺陷，只有 API 形状与性能提示 |
 | R4 | `prune` 的 `expect("blob was counted")` 应改为错误 | **成立且更严重** | 重复 `FileId` 会先在下标处算术下溢；见 A-05。应同时去重、检查计数并返回错误 |
 | R5 | `recover_entry` 多处借用 `manifest.path`，可读性差 | **不成立（非缺陷）** | 借用能编译且生命周期清晰；克隆路径只会增加分配。可作为可读性重构，不进入缺陷清单 |
-| R6 | 部分 `pub` 方法缺少“调用方须持锁”文档 | **成立** | `commit`、`rename`、`set_hook`、`begin_apply`、`finish_apply` 都缺；见 A-09 |
+| R6 | 部分 `pub` 方法缺少“调用方须持锁”文档 | **成立（已修复）** | 现在不是靠文档，而是靠 `&WriteLock` 参数要求写锁；见 A-09 |
 | R7 | `write_holder` 每次截断重写，可能被并发读到中间态 | **成立（低）** | 仅诊断用；另外设计承诺的开始时间未写入，见 A-16 |
 | R8 | `is_init_temp` 硬编码 `BAKON_STORE.` 前缀 | **成立且更严重（已修复）** | 不只是常量重复：任何 `BAKON_STORE.*.tmp` 普通文件都会被删除，见 A-01；现在前缀由 `MARKER_FILE` 派生，严格数字匹配且不删除 |
 | R9 | 测试的 `path()` 使用 `/tmp`，Windows 会失败 | **部分成立** | 单元测试的 `/tmp` 是路径断言，Windows 上字符串断言确实会失败；实际文件 I/O 已多用 `TempDir`。更大的 Windows 障碍是 `.sh` 编辑器与 `sh -c`，见 A-10 |
@@ -354,8 +353,8 @@ $$\mathrm{projected}(S)=\{\,f\mid D(f)=\mathrm{content}(\mathrm{head}(M(f)))\,\}
 | R-02 | 初始化空存储，写入指向不存在 `FileId` 的合法 `.pending`，执行 `verify` | 退出 6，报告 `pending_apply` | A-02 |
 | R-03 | 对 R-02 执行 `verify --fix` | 修复后退出 6，`.pending` 保留；修复前退出 0 并删除 | A-02 |
 | R-04 | `--store <不存在路径> verify` | 修复后退出 6，路径不存在；修复前退出 0 并创建标记、布局与 `.lock` | A-06 |
-| R-05 | 目录中有普通文件 `blocker` 与 `victim`，执行 `edit <dir>/blocker/../victim` | 内核读取该路径返回 ENOTDIR；`bakon` 退出 0 并把 `<dir>/victim` 纳管 | A-07 |
-| R-06 | 纳管 0600 文件，检查对象权限 | 对象与清单为 0664，目录为 0775（受 `umask` 影响） | A-08 |
+| R-05 | 目录中有普通文件 `blocker` 与 `victim`，执行 `edit <dir>/blocker/../victim` | 修复后退出 2 且不创建存储；修复前退出 0 并把 `<dir>/victim` 纳管 | A-07 |
+| R-06 | 纳管 0600 文件，检查对象权限 | 修复后对象、清单、锁与标记为 0600，新建目录为 0700；修复前随 `umask` 为 0664/0775 | A-08 |
 | R-07 | 将存储设为只读，执行 `log` | 退出 8，`I/O error: Permission denied` | A-13 |
 | R-08 | 把单版本清单的 `ver` 改为 `4294967295`，执行 `verify`，再执行 `edit` | `verify` 返回 0；`edit` 返回 70 “version number overflow” | A-14 |
 | R-09 | 破坏一个清单后执行 `verify` 或 `verify --format json` | 只打印 `corrupt manifest`，退出 6；没有报告其余项 | A-11 |
@@ -375,7 +374,7 @@ $$\mathrm{projected}(S)=\{\,f\mid D(f)=\mathrm{content}(\mathrm{head}(M(f)))\,\}
 
 ### 6.2 P2
 
-**A-03 写回没有 pending 的分支。** `Store::committed(id, ver)` 对任意已存在版本返回 `Committed`，`Committed::apply` 直接调用 `write_target`，不经过 `begin_apply`（`crates/bakon-core/src/store/mod.rs:127-138, 261-274`）。CLI 在 `revert` 的“目标内容等于 head”分支使用它（`crates/bakon-cli/src/commands.rs:171-176`）：若目标已是普通文件，`write_existing` 先 `O_TRUNC` 再写；磁盘满或 I/O 错误发生在截断之后时，目标留下部分内容，而 `.pending` 不存在，恢复流程没有依据。形式陈述：存在转移 $S\to S'$，其中 $D$ 被部分写入、$P(S')=\emptyset$，且 $M$ 的 pending 为空；这违反 $\mathbf{P_4}$。已修复：目标已存在时直接 no-op，不再截断重写；只有目标缺失时才创建。`Store::committed` 仍公开，旧版本写回面留给 A-09 收紧。
+**A-03 写回没有 pending 的分支。** `Store::committed(id, ver)` 对任意已存在版本返回 `Committed`，`Committed::apply` 直接调用 `write_target`，不经过 `begin_apply`（`crates/bakon-core/src/store/mod.rs:127-138, 261-274`）。CLI 在 `revert` 的“目标内容等于 head”分支使用它（`crates/bakon-cli/src/commands.rs:171-176`）：若目标已是普通文件，`write_existing` 先 `O_TRUNC` 再写；磁盘满或 I/O 错误发生在截断之后时，目标留下部分内容，而 `.pending` 不存在，恢复流程没有依据。形式陈述：存在转移 $S\to S'$，其中 $D$ 被部分写入、$P(S')=\emptyset$，且 $M$ 的 pending 为空；这违反 $\mathbf{P_4}$。已修复：目标已存在时直接 no-op，不再截断重写；只有目标缺失时才创建。`Store::committed` 与 `Committed::apply` 现在都要求 `&WriteLock`；旧版本句柄仍可构造，但不能再脱离写锁调用。
 
 **A-04 公共提交不检查路径唯一。** `prepare_track` 生成新 `FileId`，`commit` 只比较 head 并写清单，不检查 $M$ 中是否已有相同 `path.key()`（`crates/bakon-core/src/store/mod.rs:281-296, 323-387`）。CLI 通过 `resolve` 规避，但核心库公开 API 可以直接产生两份同路径清单，违反 $\mathbf{S_1}$/$\mathbf{P_9}$。后果是 `resolve` 返回其中一份、`ls` 静默折叠、后续 `edit` 可能更新非预期历史；`verify` 只能报告 `duplicate_path`，不能自动修复。已修复：`commit` 的 track 分支（`expected_head == None`）先调用 `resolve`，路径已被任何清单占用时返回 `AlreadyManaged`（4），不再写入第二份清单。
 
@@ -383,11 +382,11 @@ $$\mathrm{projected}(S)=\{\,f\mid D(f)=\mathrm{content}(\mathrm{head}(M(f)))\,\}
 
 **A-06 `Store::open` 自动创建存储。** `open` 直接调用 `init`；`init` 在路径不存在时创建目录、标记与布局（`crates/bakon-core/src/store/mod.rs:143-187`；CLI 在 `crates/bakon-cli/src/commands.rs:971-979` 调用）。`verify`、`log`、`ls` 等读命令都先 `open`，因此 `bakon --store /typo verify` 会创建一个空存储并返回 0；`log` 随后会返回 3（未纳管），但创建副作用已经发生。API §3 把 `Store::open` 的失败定义为 6（未初始化），而 OPS §1 又说“不存在则创建”；两条契约冲突。已修复：`Store::open` 只接受已有标记，缺失、空目录或无标记都返回 6 且不创建；`init` 命令与首次 `edit` 使用 `Store::init` 的创建语义，其他读/写命令使用 `open`。上述 R-04 现在退出 6 且路径不存在。
 
-**A-07 `..` 的词法折叠。** `reject_symlinked_parent_traversal` 只在 `..` 前的组件是符号链接或规范路径不一致时拒绝（`crates/bakon-core/src/types.rs:97-144`）；如果前缀是普通文件，`fs::canonicalize` 等于自身，检查通过，随后 `clean` 弹出该文件组件。于是 `d/blocker/../victim` 被当作 `d/victim`，而内核会因 `blocker` 不是目录返回 ENOTDIR。缺失前缀同理。修复：对用户输入直接拒绝任何 `..`（最简单且与文档“规范化绝对路径”一致），或用 `openat`/`realpath` 保留内核语义。仅靠符号链接检查不足以建立路径身份。
+**A-07 `..` 的词法折叠。** 审计时 `reject_symlinked_parent_traversal` 只在 `..` 前的组件是符号链接或规范路径不一致时拒绝；如果前缀是普通文件，`fs::canonicalize` 等于自身，检查通过，随后 `clean` 弹出该文件组件。于是 `d/blocker/../victim` 被当作 `d/victim`，而内核会因 `blocker` 不是目录返回 ENOTDIR。缺失前缀同理。已修复：`AbsPath::new` 对任何 `ParentDir` 组件直接返回 `Usage`（退出 2），不再做可能偏离内核语义的折叠；`join` 收紧为 `pub(crate)`，只用于内部固定组件。上述 R-05 现在退出 2 且不创建存储。
 
-**A-08 存储权限扩大可读范围。** `write_atomic` 与 `create_dir_all` 使用默认模式（`crates/bakon-core/src/fsutil.rs:33-51`；对象写入在 `object/mod.rs:38-51`）；在常见 `umask 022` 下，对象为 0644、目录为 0755，在 `umask 002` 下为 0664/0775。目标文件若是 0600，其明文内容被压缩后仍以更宽权限存放。设计明确不做加密，但“不做加密”不等于“默认让同组/其他用户可读”。修复：存储根 0700、`files/`/`objects/`/`trash/`/临时文件 0600，或在创建时显式设置；文档说明本地机密性边界。
+**A-08 存储权限扩大可读范围。** `write_atomic` 与 `create_dir_all` 使用默认模式（`crates/bakon-core/src/fsutil.rs:33-51`；对象写入在 `object/mod.rs:38-51`）；在常见 `umask 022` 下，对象为 0644、目录为 0755，在 `umask 002` 下为 0664/0775。目标文件若是 0600，其明文内容被压缩后仍以更宽权限存放。设计明确不做加密，但“不做加密”不等于“默认让同组/其他用户可读”。已修复：Unix 上新建存储根与布局目录显式使用 `0700`，`write_atomic`、对象分片、`.lock` 与所有原子写临时文件显式使用 `0600`；`open` 不修改已存在目录。文档补充了“不加密，机密性依赖权限与宿主机访问控制”的边界。
 
-**A-09 锁与写回没有类型承载。** `StoreLock` 不携带 `exclusive`（`crates/bakon-core/src/store/mod.rs:907-970`），`commit`/`rename`/`set_hook`/`begin_apply`/`finish_apply` 不接收 guard，`Store::committed` 还能为旧版本构造写回句柄。因此 $\mathbf{S_{10}}$ 与 $\mathbf{S_6}$ 的写回部分仍是调用点约定。CLI 的主路径遵守锁，但库调用者可以编译出“共享锁下提交”或“未持锁写回”。修复：`ReadLock`/`WriteLock` 两个类型；写方法接收 `&WriteLock`；`Committed` 只在持有写锁的事务中构造；用 `trybuild` 添加未持锁调用失败的编译用例。
+**A-09 锁与写回没有类型承载。** `StoreLock` 不携带 `exclusive`（`crates/bakon-core/src/store/mod.rs:907-970`），`commit`/`rename`/`set_hook`/`begin_apply`/`finish_apply` 不接收 guard，`Store::committed` 还能为旧版本构造写回句柄。因此 $\mathbf{S_{10}}$ 与 $\mathbf{S_6}$ 的写回部分仍是调用点约定。CLI 的主路径遵守锁，但库调用者可以编译出“共享锁下提交”或“未持锁写回”。已修复：`ReadLock`/`WriteLock` 是两个不互通的具体类型；`prepare_track`/`prepare_commit`/`commit`/`rename`/`set_hook`/`prune`/`begin_apply`/`finish_apply`/`committed`/`Committed::apply` 以及 `verify_fix` 都要求 `&WriteLock`；`WriteLock` 字段私有，只能由 `begin_write`/`begin_verify` 产生。`ReadLock` 的文档包含 `compile_fail,E0308` 用例，把 `&ReadLock` 传给 `prepare_track` 时 `cargo test --doc` 断言编译失败。
 
 **A-10 测试的跨平台门。** 单元测试在 `manifest.rs:264`、`types.rs:351-388`、`store/mod.rs:1118-1120` 中使用 `/tmp/...` 字面量；Windows 上 `AbsPath::new` 会把它变成带盘符的路径，字符串断言（如 `"/tmp/file"`）失败。集成测试大量写入 `.sh` 编辑器并用 `sh -c` 执行；`cli.rs`、`crash.rs`、`concurrency.rs` 的多数用例没有 `#[cfg(unix)]`。因此 `cargo test` 在 Windows 上不可作为门禁，与“跨平台项目”的声明不匹配。修复：断言用 `TempDir` 派生路径；脚本编辑器按平台生成（Windows 用 `.cmd`/`cmd /C`）或把 Unix-only 用例显式门控；在 Windows/macOS runner 跑全量测试，而不只是 smoke。
 
@@ -439,7 +438,7 @@ $$\mathrm{projected}(S)=\{\,f\mid D(f)=\mathrm{content}(\mathrm{head}(M(f)))\,\}
 
 ### 7.2 类型承载与运行时锁
 
-类型论视角下，若写接口签名是 `fn commit(&mut self, ...)`，则“持有写锁”不在类型中；若改成 `fn commit(&mut self, guard: &WriteLock, ...)`，则共享锁下的调用不可编译。A-09 说明当前实现仍把 $\mathbf{S_{10}}$ 放在调用点。反过来，`Committed::apply` 消费 `self` 只证明“版本已存在”，不证明“本次写回有 pending”，因此 $\mathbf{S_6}$ 只承载了一半。修复不是加注释，而是让“可写回”成为由 `begin_apply` 产生的线性令牌。
+类型论视角下，若写接口签名是 `fn commit(&mut self, ...)`，则“持有写锁”不在类型中；若改成 `fn commit(&mut self, guard: &WriteLock, ...)`，则共享锁下的调用不可编译。A-09 已按后者修复：$\mathbf{S_{10}}$ 由 `WriteLock` 承载。反过来，`Committed::apply` 消费 `self` 只证明“版本已存在”，不证明“本次写回有 pending”，因此 $\mathbf{S_6}$ 仍只承载了一半；真正的线性令牌应由 `begin_apply` 产生，`finish_apply` 消费。这项收紧尚未实现，留作后续设计，不在 v1 的 A-09 范围内。
 
 ### 7.3 序理论与裁剪
 
@@ -463,9 +462,9 @@ A-07 说明 `AbsPath` 的等价关系不是内核等价关系：词法折叠把�
 | 2 | A-04 | track 提交检查路径键唯一；写锁入参 | 库调用两次 track 同路径，第二次返回 `AlreadyManaged`/冲突 |
 | 2 | A-05 | `ids` 去重；`checked_sub`；`expect` 改错误 | 重复 id 的 `prune` 不再 panic，报告唯一 |
 | 2 | A-06 | `open` 要求标记；`init` 显式；读命令不创建 | `--store <typo> verify` 返回 6 且不产生文件 |
-| 2 | A-07 | 拒绝任何 `..` 或使用内核语义 | `blocker/../victim` 返回用法错误；符号链接用例仍拒绝 |
-| 2 | A-08 | 存储根 0700、对象/清单/临时 0600 | 0600 目标的对象仍为 0600；`umask` 不扩大 |
-| 2 | A-09 | `ReadLock`/`WriteLock`；写接口收 guard；`trybuild` | 未持锁提交/共享锁提交不可编译 |
+| 2 | A-07 | 拒绝任何 `..` 或使用内核语义 | 已修复：`blocker/../victim` 返回 2；含 `..` 的输入不进入 `clean` |
+| 2 | A-08 | 存储根 0700、对象/清单/临时 0600 | 已修复：`umask` 不扩大新建目录/文件；Unix 权限测试覆盖根、布局、清单、对象、锁 |
+| 2 | A-09 | `ReadLock`/`WriteLock`；写接口收 guard | 已修复：共享锁/未持锁调用不可编译；`compile_fail,E0308` 文档用例通过 |
 | 2 | A-10 | 测试路径用 `TempDir`；脚本按平台门控 | Windows/macOS runner 全量 `cargo test` |
 | 2 | A-11 | 引用集只用有效清单；损坏清单单独报告 | 一份损坏 + 一份缺对象，`verify` 同时报告两项 |
 | 2 | A-12 | 状态命令补 JSON；全局参数或文档 | 每个命令 `--format json` 输出可解析；`--no-hook` 全局位置可用 |
@@ -482,7 +481,7 @@ A-07 说明 `AbsPath` 的等价关系不是内核等价关系：词法折叠把�
 - `cargo fmt --all --check`：通过。
 - R-01 至 R-11 与 R-14 使用真实二进制与隔离存储复现；R-12/R-13 已转为 `store` 单元回归用例。
 - 0600 文件的对象权限、只读存储、损坏清单、`u32::MAX` 清单、`.pending` 缺失清单均按第 5 节观测。
-- A-20 的退出码 9 实现后测试总数为 123；A-01 至 A-06 修复后为 136；本节的 120 是审计时基线。
+- A-20 的退出码 9 实现后测试总数为 123；A-01 至 A-09 修复后为 138，另有 1 个 `compile_fail` 文档用例；本节的 120 是审计时基线。
 
 ### 9.2 未覆盖
 

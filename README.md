@@ -793,7 +793,7 @@ bakon log ./app.conf
 | 退出 8 | 权限或普通 IO 错误 | 检查目录权限和磁盘状态 |
 | 退出 9 | 版本已写入并可见，但父目录 `fsync` 失败，持久性未确认 | 不要盲目重试；先用 `bakon log` / `bakon verify` 确认可见状态并备份；断电可能丢失该版本 |
 | `path is not valid UTF-8` | 目标路径不是 UTF-8 | 使用 UTF-8 路径；bakon 把路径存为文本 |
-| `path traverses a symbolic link before '..'` | 路径中的 `..` 前面经过符号链接，实际目标不确定 | 使用解析后的绝对路径，去掉 `..` |
+| `path contains '..'` | 路径含 `..`，词法折叠可能偏离内核语义 | 使用解析后的绝对路径，去掉 `..` |
 
 脚本只应依赖退出码和 `--format json` 输出，不要依赖错误消息文本。
 
