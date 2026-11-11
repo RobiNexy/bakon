@@ -60,7 +60,7 @@ jobs:
           - os: macos-15-intel
             target: x86_64-apple-darwin
             platform: darwin-amd64
-          - os: macos-15
+          - os: macos-14
             target: aarch64-apple-darwin
             platform: darwin-arm64
     steps:
