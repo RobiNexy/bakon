@@ -7,7 +7,7 @@ use std::fmt;
 use std::io;
 use std::time::Duration;
 
-use crate::types::{AbsPath, Ver};
+use crate::types::{AbsPath, FileId, Ver};
 
 /// 核心库的统一错误类型。
 #[derive(Debug)]
@@ -51,6 +51,12 @@ pub enum Error {
     Corrupt { what: &'static str, detail: String },
     /// 版本已记录，但写回目标文件失败。
     ApplyFailed { ver: Ver, source: io::Error },
+    /// 清单已提交且可见，但父目录 `fsync` 失败，断电后可能丢失。
+    DurabilityUncertain {
+        id: FileId,
+        version: Option<Ver>,
+        source: io::Error,
+    },
     /// 环境或权限导致的 I/O 失败。
     Io(io::Error),
     /// 不应发生的内部不一致。
@@ -79,6 +85,7 @@ impl Error {
             | Self::Corrupt { .. } => 6,
             Self::ApplyFailed { .. } => 7,
             Self::Io(_) => 8,
+            Self::DurabilityUncertain { .. } => 9,
             Self::Internal(_) => 70,
         }
     }
@@ -162,6 +169,27 @@ impl fmt::Display for Error {
                 "failed to write version {} back to the target file: {source}",
                 ver.get()
             ),
+            Self::DurabilityUncertain {
+                id,
+                version,
+                source,
+            } => {
+                match version {
+                    Some(version) => write!(
+                        f,
+                        "the manifest of {id} (head version {}) is visible, but its durability could not be confirmed: {source}",
+                        version.get()
+                    )?,
+                    None => write!(
+                        f,
+                        "the manifest of {id} is visible, but its durability could not be confirmed: {source}"
+                    )?,
+                }
+                write!(
+                    f,
+                    "; do not retry blindly; run `bakon log` and `bakon verify` to confirm the visible state"
+                )
+            }
             Self::Io(source) => write!(f, "I/O error: {source}"),
             Self::Internal(message) => write!(f, "internal error: {message}"),
         }
@@ -173,6 +201,7 @@ impl std::error::Error for Error {
         match self {
             Self::Io(source) => Some(source),
             Self::ApplyFailed { source, .. } => Some(source),
+            Self::DurabilityUncertain { source, .. } => Some(source),
             _ => None,
         }
     }
@@ -190,7 +219,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{AbsPath, Ver};
+    use crate::types::{AbsPath, FileId, Ver};
 
     fn path() -> AbsPath {
         AbsPath::new("/tmp/bakon-test").unwrap()
@@ -281,6 +310,14 @@ mod tests {
                     source: io::Error::other("denied"),
                 },
                 7,
+            ),
+            (
+                Error::DurabilityUncertain {
+                    id: FileId::generate(),
+                    version: Some(Ver::new(1).unwrap()),
+                    source: io::Error::other("fsync failed"),
+                },
+                9,
             ),
             (Error::Io(io::Error::other("denied")), 8),
             (Error::Internal("bug".into()), 70),

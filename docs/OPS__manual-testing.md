@@ -351,6 +351,7 @@ bakon --store "$BAKON_HOME/store.backup" log ./nginx-main.conf
 - 存储损坏或 `verify` 不一致：退出 6；先备份再按提示处理。
 - 版本已记录但写回失败：退出 7；修复权限后重试。
 - 权限或普通 IO 错误：退出 8。
+- 版本已提交且可见，但父目录 `fsync` 失败、持久性未确认：退出 9；不要盲目重试，先用 `log`/`verify` 确认可见状态并备份。
 
 诊断信息在 `stderr`；`stdout` 只放数据。
 

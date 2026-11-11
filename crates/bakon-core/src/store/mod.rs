@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use crate::clock::now_rfc3339;
-use crate::fsutil::{remove_dir_contents, write_atomic};
+use crate::fsutil::{WriteOutcome, remove_dir_contents, write_atomic};
 use crate::manifest::{Codec, Manifest, Source, VersionRecord};
 use crate::object::{ObjectStore, hash_bytes};
 use crate::types::{AbsPath, BlobHash, FileId, Ver};
@@ -420,7 +420,14 @@ impl Store {
         let encoded = serde_json::to_vec_pretty(manifest)
             .map_err(|error| Error::Internal(format!("cannot encode manifest: {error}")))?;
         let files = self.root.join(FILES_DIR);
-        write_atomic(&self.manifest_path(manifest.id), &files, &encoded)
+        match write_atomic(&self.manifest_path(manifest.id), &files, &encoded)? {
+            WriteOutcome::Durable => Ok(()),
+            WriteOutcome::VisibleButNotDurable(source) => Err(Error::DurabilityUncertain {
+                id: manifest.id,
+                version: manifest.max_ver(),
+                source,
+            }),
+        }
     }
 
     fn next_file_id(&self) -> Result<FileId> {
@@ -672,7 +679,7 @@ impl Store {
         };
         let encoded = serde_json::to_vec_pretty(index)
             .map_err(|error| Error::Internal(format!("cannot encode index: {error}")))?;
-        write_atomic(&self.index_path(), &self.root, &encoded)
+        write_atomic(&self.index_path(), &self.root, &encoded)?.require_durable()
     }
 
     fn remember(&mut self, manifest: &Manifest) {
@@ -865,7 +872,7 @@ impl Store {
         };
         let encoded = serde_json::to_vec(&file)
             .map_err(|error| Error::Internal(format!("cannot encode pending file: {error}")))?;
-        write_atomic(&self.pending_path(), &self.root, &encoded)
+        write_atomic(&self.pending_path(), &self.root, &encoded)?.require_durable()
     }
 
     fn clear_pending(&self) -> Result<()> {
@@ -1009,7 +1016,7 @@ fn initialize(root: &AbsPath) -> Result<Marker> {
     let mut encoded = serde_json::to_vec_pretty(&marker)
         .map_err(|error| Error::Internal(format!("cannot encode store marker: {error}")))?;
     encoded.push(b'\n');
-    write_atomic(&root.join(MARKER_FILE), root, &encoded)?;
+    write_atomic(&root.join(MARKER_FILE), root, &encoded)?.require_durable()?;
     ensure_layout(root)?;
     Ok(marker)
 }

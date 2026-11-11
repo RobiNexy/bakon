@@ -47,7 +47,7 @@ impl ObjectStore {
             fs::create_dir_all(shard).map_err(Error::Io)?;
             crate::fsutil::fsync_dir(self.root.as_path())?;
         }
-        write_atomic(&path, &self.temporary, &compressed)?;
+        write_atomic(&path, &self.temporary, &compressed)?.require_durable()?;
         Ok(hash)
     }
 

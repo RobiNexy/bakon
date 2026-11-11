@@ -61,10 +61,10 @@ impl Committed {
 | `content(&BlobHash) -> Vec<u8>` | 对象存在 | 解压并校验哈希 | 6（缺失、损坏） |
 | `versions(FileId) -> &[VersionRecord]` | — | 升序 | 6 |
 | `begin_write() -> WriteGuard` | — | 持排他锁，超时退出 4 | 4、8 |
-| `commit(Prepared) -> Committed` | 持有 `WriteGuard`，head 未变 | 追加版本、必要时裁剪 | 4（head 变化）、8、6 |
+| `commit(Prepared) -> Committed` | 持有 `WriteGuard`，head 未变 | 追加版本、必要时裁剪 | 4（head 变化）、8、9（持久性未确认）、6 |
 | `prune(&[FileId]) -> PruneReport` | 持有 `WriteGuard` | 截断后缀、回收对象 | 8 |
 | `rename(FileId, AbsPath)` | 持有 `WriteGuard` | 更新清单 `path` 与缓存 | 4（目标已存在） |
-| `verify(options) -> Report` | — | 只读；`--fix` 时持排他锁 | 6 |
+| `verify(options) -> Report` | — | 只读；`--fix` 时持排他锁 | 6、9（修复时持久性未确认） |
 
 读取接口持共享锁（`Store::open` 的读模式），写接口持排他锁；`edit` 的编辑器阶段不持锁，提交时用 `expected_head` 比较交换。契约细节见 [[SEQUENCE__write-protocol-and-failure-paths]]。
 
@@ -84,6 +84,11 @@ pub enum Error {
     AlreadyManaged { path: AbsPath },
     Corrupt { what: &'static str, detail: String },
     ApplyFailed { ver: Ver, source: io::Error },
+    DurabilityUncertain {
+        id: FileId,
+        version: Option<Ver>,
+        source: io::Error,
+    },
     Io(io::Error),
     HookFailed { ver: Ver, status: i32 },
     EditorFailed { status: i32 },
@@ -94,7 +99,7 @@ pub enum Error {
 }
 ```
 
-`Error::exit_code` 是唯一的映射入口（0/1/2/3/4/5/6/7/8/70）。禁止在调用点拼错误字符串再匹配（0.x 的 F10 即由此产生）。
+`Error::exit_code` 是唯一的映射入口（0/1/2/3/4/5/6/7/8/9/70）。禁止在调用点拼错误字符串再匹配（0.x 的 F10 即由此产生）。退出码 9 表示「清单 `rename` 已成功、版本可见，但父目录 `fsync` 失败，持久性未确认」；它不同于 8（未提交的 IO/权限失败），见 [[ADR__exit-9-when-durability-uncertain]]。
 
 ## 5. 命令行
 

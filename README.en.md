@@ -790,6 +790,7 @@ Confirm the `salvage` or `revert` entry exists.
 | Exit 6 | Corrupt or inconsistent store, not a bakon store, or schema mismatch | Back up the whole store, then use `verify --fix` or follow the report |
 | Exit 7 | Version recorded, but writing the target failed | Check permissions, read-only mounts, or disk space, then retry |
 | Exit 8 | Permission or general I/O error | Check directory permissions and disk health |
+| Exit 9 | Version written and visible, but the parent directory `fsync` failed, so durability is unconfirmed | Do not retry blindly; use `bakon log` / `bakon verify` to confirm the visible state and back up; a power loss may lose that version |
 | `path is not valid UTF-8` | The target path is not UTF-8 | Use a UTF-8 path; bakon stores paths as text |
 | `path traverses a symbolic link before '..'` | `..` follows a symlink, so the real target is ambiguous | Use a resolved absolute path without `..` |
 

@@ -14,23 +14,48 @@ static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// 保证目录项本身已落盘；只 fsync 文件不足以让 `rename` 结果持久。
 #[cfg(unix)]
-pub(crate) fn fsync_dir(path: &Path) -> Result<()> {
-    File::open(path)
-        .and_then(|directory| directory.sync_all())
-        .map_err(Error::Io)
+fn fsync_dir_raw(path: &Path) -> io::Result<()> {
+    File::open(path)?.sync_all()
 }
 
 /// Windows 没有等价的目录 fsync；崩溃恢复退化为可能丢失最后一次提交。
 #[cfg(not(unix))]
-pub(crate) fn fsync_dir(_path: &Path) -> Result<()> {
+fn fsync_dir_raw(_path: &Path) -> io::Result<()> {
     Ok(())
+}
+
+pub(crate) fn fsync_dir(path: &Path) -> Result<()> {
+    fsync_dir_raw(path).map_err(Error::Io)
+}
+
+/// 原子替换的结果。`rename` 成功即已提交且可见；目录 `fsync` 只决定持久性。
+#[must_use]
+#[derive(Debug)]
+pub(crate) enum WriteOutcome {
+    Durable,
+    VisibleButNotDurable(io::Error),
+}
+
+impl WriteOutcome {
+    /// 需要“未提交即失败”的调用方使用；已提交但持久性未确认也视为失败。
+    pub(crate) fn require_durable(self) -> Result<()> {
+        match self {
+            Self::Durable => Ok(()),
+            Self::VisibleButNotDurable(source) => Err(Error::Io(source)),
+        }
+    }
 }
 
 /// 原子替换：临时文件 → 写入 → fsync → rename → 目录 fsync。
 ///
 /// 临时文件必须与最终路径同一文件系统；`tmp_dir` 通常就是最终文件的父目录，
-/// 对象层例外地使用 `objects/tmp/`。失败时临时文件会被尽力删除。
-pub(crate) fn write_atomic(path: &AbsPath, tmp_dir: &AbsPath, bytes: &[u8]) -> Result<()> {
+/// 对象层例外地使用 `objects/tmp/`。`rename` 前失败返回 `Err` 并尽力删除临时文件；
+/// `rename` 成功后返回 [`WriteOutcome`]，目录 `fsync` 失败只影响持久性，不撤销可见提交。
+pub(crate) fn write_atomic(
+    path: &AbsPath,
+    tmp_dir: &AbsPath,
+    bytes: &[u8],
+) -> Result<WriteOutcome> {
     fs::create_dir_all(tmp_dir.as_path()).map_err(Error::Io)?;
     let temporary = temporary_path(tmp_dir, path);
 
@@ -53,12 +78,31 @@ pub(crate) fn write_atomic(path: &AbsPath, tmp_dir: &AbsPath, bytes: &[u8]) -> R
     durability_point();
 
     if let Some(parent) = path.as_path().parent() {
-        fsync_dir(parent)?;
+        if let Some(error) = injected_fsync_failure(parent) {
+            return Ok(WriteOutcome::VisibleButNotDurable(error));
+        }
+        if let Err(error) = fsync_dir_raw(parent) {
+            return Ok(WriteOutcome::VisibleButNotDurable(error));
+        }
         durability_point();
     }
     // 不 fsync 临时目录：崩溃残留的 tmp 文件没有引用，启动时会被清空；
     // 目标目录的 fsync 才决定 rename 结果是否可见。
-    Ok(())
+    Ok(WriteOutcome::Durable)
+}
+
+/// 测试用故障注入：debug 构建下按目录名模拟父目录 `fsync` 失败。
+/// 失败发生在 `rename` 之后，用于覆盖“已可见但持久性未确认”的分支。
+#[cfg(debug_assertions)]
+fn injected_fsync_failure(parent: &Path) -> Option<io::Error> {
+    let requested = std::env::var("BAKON_TEST_FAIL_FSYNC_DIR").ok()?;
+    let name = parent.file_name()?.to_str()?;
+    (name == requested).then(|| io::Error::other("injected directory fsync failure"))
+}
+
+#[cfg(not(debug_assertions))]
+fn injected_fsync_failure(_parent: &Path) -> Option<io::Error> {
+    None
 }
 
 fn write_and_sync(file: &mut File, bytes: &[u8]) -> Result<()> {

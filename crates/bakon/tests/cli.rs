@@ -920,3 +920,91 @@ fn global_retention_trims_during_commit() {
     let oldest = fixture.run(&["show", fixture.file(), "0"]);
     assert_eq!(oldest.status.code(), Some(3));
 }
+
+#[cfg(all(unix, debug_assertions))]
+#[test]
+fn uncertain_manifest_fsync_exits_nine_and_stays_visible() {
+    let fixture = Fixture::new(b"one");
+    let noop = editor_script_named(fixture.temp(), "noop.sh", "exit 0");
+    let changed = editor_script_named(fixture.temp(), "changed.sh", "printf 'two' > \"$1\"");
+    assert_eq!(fixture.edit(&noop).status.code(), Some(0));
+    let hook_marker = fixture.temp().join("hook-ran");
+    let hook = format!("touch {}", hook_marker.display());
+    let set = fixture.run(&["hook", "set", fixture.file(), &hook]);
+    assert_eq!(set.status.code(), Some(0), "stderr: {}", stderr(&set));
+
+    let output = run_with_env(
+        &["--store", fixture.store(), "edit", fixture.file()],
+        &[
+            ("EDITOR", changed.as_path()),
+            ("BAKON_TEST_FAIL_FSYNC_DIR", Path::new("files")),
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(9), "stderr: {}", stderr(&output));
+    assert!(
+        stderr(&output).contains("durability could not be confirmed"),
+        "stderr: {}",
+        stderr(&output)
+    );
+    assert!(
+        !hook_marker.exists(),
+        "the hook must not run for an uncertain commit"
+    );
+
+    let log = fixture.run(&["--format", "plain", "log", fixture.file()]);
+    assert_eq!(log.status.code(), Some(0), "stderr: {}", stderr(&log));
+    assert_eq!(stdout(&log).lines().count(), 2, "{}", stdout(&log));
+    assert_eq!(fixture.run(&["verify"]).status.code(), Some(0));
+
+    assert_eq!(fixture.edit(&changed).status.code(), Some(0));
+    let log = fixture.run(&["--format", "plain", "log", fixture.file()]);
+    assert_eq!(stdout(&log).lines().count(), 2, "{}", stdout(&log));
+}
+
+#[cfg(all(unix, debug_assertions))]
+#[test]
+fn uncertain_pending_commit_fsync_exits_nine_and_recovers() {
+    let fixture = Fixture::new(b"one");
+    let noop = editor_script_named(fixture.temp(), "noop.sh", "exit 0");
+    let changed = editor_script_named(fixture.temp(), "changed.sh", "printf 'two' > \"$1\"");
+    assert_eq!(fixture.edit(&noop).status.code(), Some(0));
+    assert_eq!(fixture.edit(&changed).status.code(), Some(0));
+
+    let output = run_with_env(
+        &["--store", fixture.store(), "revert", fixture.file(), "0"],
+        &[("BAKON_TEST_FAIL_FSYNC_DIR", Path::new("files"))],
+    );
+
+    assert_eq!(output.status.code(), Some(9), "stderr: {}", stderr(&output));
+    assert_eq!(fs::read(fixture.file()).unwrap(), b"two");
+    let pending = Path::new(fixture.store()).join(".pending");
+    assert!(pending.exists(), "the pending record must survive exit 9");
+
+    let verify = fixture.run(&["verify"]);
+    assert_eq!(verify.status.code(), Some(6), "stderr: {}", stderr(&verify));
+    let fixed = fixture.run(&["verify", "--fix"]);
+    assert_eq!(fixed.status.code(), Some(0), "stderr: {}", stderr(&fixed));
+    assert_eq!(fs::read(fixture.file()).unwrap(), b"one");
+    assert!(!pending.exists(), "recovery must clear the pending record");
+}
+
+#[cfg(all(unix, debug_assertions))]
+#[test]
+fn uncertain_rename_fsync_exits_nine_and_keeps_the_new_path() {
+    let fixture = Fixture::new(b"one");
+    let noop = editor_script_named(fixture.temp(), "noop.sh", "exit 0");
+    assert_eq!(fixture.edit(&noop).status.code(), Some(0));
+
+    let new_path = fixture.temp().join("renamed.txt");
+    let new_arg = new_path.to_str().unwrap();
+    let output = run_with_env(
+        &["--store", fixture.store(), "mv", fixture.file(), new_arg],
+        &[("BAKON_TEST_FAIL_FSYNC_DIR", Path::new("files"))],
+    );
+
+    assert_eq!(output.status.code(), Some(9), "stderr: {}", stderr(&output));
+    let log = fixture.run(&["--format", "plain", "log", new_arg]);
+    assert_eq!(log.status.code(), Some(0), "stderr: {}", stderr(&log));
+    assert_eq!(stdout(&log).lines().count(), 1);
+}

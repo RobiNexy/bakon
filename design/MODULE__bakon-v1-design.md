@@ -19,6 +19,7 @@
 |---|---|
 | 为什么不依赖 git | [[ADR__replace-git-with-own-content-addressed-store]] |
 | 为什么用 Rust | [[ADR__rewrite-in-rust]] |
+| `rename` 提交点与退出码 9 | [[ADR__exit-9-when-durability-uncertain]] |
 | 状态机、不变量、崩溃点 | [[STATE__store-state-machine-and-invariants]] |
 | 对象层与持久化 | [[DATA__blob-store-and-durability]] |
 | 清单、编号、保留 | [[DATA__version-manifest-and-numbering]] |
@@ -28,6 +29,7 @@
 | 重构前的缺陷清单 | [[design-audit-2026-11-10]] |
 | v1 设计与实现的再次形式化审计 | [[design-audit-v1-2026-11-10]] |
 | v1 修复后的复核 | [[design-audit-v1-2026-11-10-recheck]] |
+| v1 全量逐模块审计（2026-11-11） | [[design-audit-v1-2026-11-11]] |
 
 ## 3. 架构
 
@@ -200,7 +202,7 @@ store/
 | 锁等待 | 无限阻塞无提示 | 2 秒后退出 4 并给出持有者 |
 | 裁剪 | 重写 git 历史 | 截断清单后缀 |
 | `index.json` | 事实来源之一 | 纯缓存，可丢 |
-| 退出码 | 1/2/3/4/5/6/70 | 增 7（未写回）、8（IO/权限），1 仅用于 diff |
+| 退出码 | 1/2/3/4/5/6/70 | 增 7（未写回）、8（IO/权限）、9（已提交但持久性未确认），1 仅用于 diff |
 | 旧历史 | — | 不自动迁移，旧目录保留 |
 
 ## 12. 风险与未决
