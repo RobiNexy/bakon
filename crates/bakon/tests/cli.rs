@@ -900,6 +900,27 @@ fn verify_reports_and_fixes_derived_data() {
 }
 
 #[test]
+fn verify_reports_a_corrupt_manifest_without_aborting() {
+    let fixture = Fixture::new(b"one");
+    let noop = editor_script(fixture.temp(), "exit 0");
+    assert_eq!(fixture.edit(&noop).status.code(), Some(0));
+    let manifest = fs::read_dir(fixture.store.join("files"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    fs::write(&manifest, b"{").unwrap();
+
+    let output = fixture.run(&["verify"]);
+
+    assert_eq!(output.status.code(), Some(6), "stderr: {}", stderr(&output));
+    let text = stdout(&output);
+    assert!(text.contains("manifest"), "{text}");
+    assert!(text.contains("orphan_scan"), "{text}");
+}
+
+#[test]
 fn verify_detects_a_missing_object() {
     let fixture = Fixture::new(b"one");
     let editor = editor_script(fixture.temp(), "printf 'two' > \"$1\"");

@@ -73,7 +73,9 @@ impl Committed {
 | `verify(options) -> Report` | 持共享锁 | 只读检查 | 6 |
 | `verify_fix(&WriteLock, options) -> Report` | 持写锁 | 检查并修复派生数据 | 6、8、9（修复时持久性未确认） |
 
-读取接口持共享锁（`Store::open` 的读模式），写接口持排他锁；`edit` 的编辑器阶段不持锁，提交时用 `expected_head` 比较交换。Unix 上新建的存储根与布局目录权限为 `0700`，清单、对象、索引、`.pending`、`.lock` 与原子写临时文件为 `0600`；已存在的目录不会被 `open` 改权限。契约细节见 [[SEQUENCE__write-protocol-and-failure-paths]]。
+读取接口持共享锁（`Store::open` 的读模式），写接口持排他锁；`edit` 的编辑器阶段不持锁，提交时用 `expected_head` 比较交换。Unix 上新建的存储根与布局目录权限为 `0700`，清单、对象、索引、`.pending`、`.lock` 与原子写临时文件为 `0600`；已存在的目录不会被 `open` 改权限。
+
+`verify` 遇到损坏清单时仍返回已收集的报告；只有无法读取目录等 I/O 错误才整体失败。存在损坏清单时引用集不完整，报告 `orphan_scan`（不可修复），`verify --fix` 不回收孤儿对象也不重建索引，避免删除仍可能被损坏清单引用的对象。契约细节见 [[SEQUENCE__write-protocol-and-failure-paths]]。
 
 ## 4. 错误模型
 

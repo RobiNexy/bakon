@@ -7,7 +7,6 @@
 > 审计来源：[[design-audit-2026-11-10]]、[[design-audit-v1-2026-11-10]]、[[design-audit-v1-2026-11-10-recheck]]、[[design-audit-v1-2026-11-11]]；v1 设计入口：[[MODULE__bakon-v1-design]]。
 
 - P2 v1 全量审计：CLI 测试依赖 `sh`/可执行脚本与 `/tmp` 断言，Windows 全量测试不可用（A-10）
-- P2 v1 全量审计：`verify` 遇到损坏清单在孤儿扫描处整体失败，报告项丢失（A-11）
 - P2 v1 全量审计：`hook set/unset`、`config init` 忽略 `--format json`；全局 `--no-hook`/`--no-color` 缺失（A-12）
 - P1 v1 M3 剩余：Windows 钩子与并发用例（[[MODULE__bakon-v1-design]] §10）
 - P2 v1 发布：演练一次 Release 回滚（[[AGENT__procedure__change-path]]）

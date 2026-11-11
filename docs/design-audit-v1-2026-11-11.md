@@ -74,7 +74,7 @@ $$\mathrm{projected}(S)=\{\,f\mid D(f)=\mathrm{content}(\mathrm{head}(M(f)))\,\}
 | A-08 | 对象与存储目录使用默认 `umask` 权限；0600 文件内容可写成 0664 对象 | P2（已修复） | $\mathbf{P_{11}}$ |
 | A-09 | `StoreLock` 不区分读写；写接口不要求 guard；`Store::committed` 可绕过 pending | P2（已修复） | $\mathbf{P_5}$ |
 | A-10 | 测试套件依赖 `sh`、可执行脚本与 `/tmp` 断言；Windows 全量测试不可用 | P2 | 跨平台质量门 |
-| A-11 | 一份损坏清单使 `verify` 在孤儿扫描处整体失败，已收集的报告项丢失 | P2 | $\mathbf{P_3}$ |
+| A-11 | 一份损坏清单使 `verify` 在孤儿扫描处整体失败，已收集的报告项丢失 | P2（已修复） | $\mathbf{P_3}$ |
 | A-12 | `hook set/unset`、`config init` 忽略 `--format json`；全局 `--no-hook`/`--no-color` 未实现 | P2 | $\mathbf{P_8}$ |
 | A-13 | 只读存储无法读取：共享锁仍以读写方式打开 `.lock` | P3 | $\mathbf{P_8}$ |
 | A-14 | 清单头为 `u32::MAX` 时 `verify` 接受，下一次提交返回内部错误 70 | P3 | $\mathbf{P_3}$ |
@@ -262,7 +262,7 @@ $$\mathrm{projected}(S)=\{\,f\mid D(f)=\mathrm{content}(\mathrm{head}(M(f)))\,\}
 |---|---|---|
 | `VerifyOptions` / `VerifyItem` / `SizeEntry` / `VerifyReport` | 报告结构 | 直接 |
 | `VerifyReport::ok` | 所有项已修复 | 正确；无法修复项保持 false |
-| `Store::verify` | 清单、pending、索引、孤儿、残留、尺寸 | 基本正确；损坏清单在孤儿扫描处整体失败，见 A-11；`--fix` 用 `begin_verify` 先报告 `pending_stale`，无法证明的记录保留并退出 6（A-02 已修复） |
+| `Store::verify` / `verify_fix` | 清单、pending、索引、孤儿、残留、尺寸 | 已修复 A-11：损坏清单只作为报告项，不再中断；引用集只由成功解析的清单构造，reachability 不完整时跳过孤儿回收。`--fix` 用 `begin_verify` 先报告 `pending_stale`（A-02 已修复） |
 
 `verify` 不检查目标文件是否等于 head；这是设计选择（外部编辑是合法状态），不是缺陷，但 OPS 的“任意命令启动时恢复”与 API 的“verify 一致”措辞需要区分“存储一致”与“投影一致”。
 
@@ -297,7 +297,7 @@ $$\mathrm{projected}(S)=\{\,f\mid D(f)=\mathrm{content}(\mathrm{head}(M(f)))\,\}
 | `mv` | 改映射 | 正确；`rename` 的锁约定见 A-09 |
 | `hook` | show/set/unset | 语义正确；JSON 输出缺失，见 A-12 |
 | `config` | show/init | 语义正确；init 忽略格式，见 A-12 |
-| `verify` | 只读/修复、格式、退出码 | 主路径正确；损坏清单时报告丢失，见 A-11；一致性提示先于 `[fixed]` 列表，属 UX 次要项 |
+| `verify` | 只读/修复、格式、退出码 | 主路径正确；损坏清单时其余报告项保留（A-11 已修复）；一致性提示先于 `[fixed]` 列表，属 UX 次要项 |
 | `log` | 版本列表，最新在前 | 正确；时间显示收敛到秒 |
 | `ls` | 全部路径 | 正确；重复路径被 `BTreeMap` 静默折叠（A-04 的投影） |
 | `path` | 路径、id、清单路径 | 正确 |
@@ -357,7 +357,7 @@ $$\mathrm{projected}(S)=\{\,f\mid D(f)=\mathrm{content}(\mathrm{head}(M(f)))\,\}
 | R-06 | 纳管 0600 文件，检查对象权限 | 修复后对象、清单、锁与标记为 0600，新建目录为 0700；修复前随 `umask` 为 0664/0775 | A-08 |
 | R-07 | 将存储设为只读，执行 `log` | 退出 8，`I/O error: Permission denied` | A-13 |
 | R-08 | 把单版本清单的 `ver` 改为 `4294967295`，执行 `verify`，再执行 `edit` | `verify` 返回 0；`edit` 返回 70 “version number overflow” | A-14 |
-| R-09 | 破坏一个清单后执行 `verify` 或 `verify --format json` | 只打印 `corrupt manifest`，退出 6；没有报告其余项 | A-11 |
+| R-09 | 破坏一个清单后执行 `verify` 或 `verify --format json` | 修复后退出 6，保留 `manifest` 与 `orphan_scan` 等报告项；修复前只打印 `corrupt manifest` | A-11 |
 | R-10 | `--format json hook set <file> true`、`--format json config init` | 输出人类文本而非 JSON | A-12 |
 | R-11 | 跟踪 v0=one、v1=two、v2=three，执行 `diff <file> 1` | 比较 v0 与 v1，而帮助把第一个参数描述为 older | A-17 |
 | R-12 | 公共 API 以同一 `FileId` 两次调用 `prune([id,id])` | 修复后去重并正常完成；修复前 debug 下溢 panic | A-05 |
@@ -390,7 +390,7 @@ $$\mathrm{projected}(S)=\{\,f\mid D(f)=\mathrm{content}(\mathrm{head}(M(f)))\,\}
 
 **A-10 测试的跨平台门。** 单元测试在 `manifest.rs:264`、`types.rs:351-388`、`store/mod.rs:1118-1120` 中使用 `/tmp/...` 字面量；Windows 上 `AbsPath::new` 会把它变成带盘符的路径，字符串断言（如 `"/tmp/file"`）失败。集成测试大量写入 `.sh` 编辑器并用 `sh -c` 执行；`cli.rs`、`crash.rs`、`concurrency.rs` 的多数用例没有 `#[cfg(unix)]`。因此 `cargo test` 在 Windows 上不可作为门禁，与“跨平台项目”的声明不匹配。修复：断言用 `TempDir` 派生路径；脚本编辑器按平台生成（Windows 用 `.cmd`/`cmd /C`）或把 Unix-only 用例显式门控；在 Windows/macOS runner 跑全量测试，而不只是 smoke。
 
-**A-11 `verify` 的整体失败。** `verify` 先把损坏清单收集为报告项，随后 `orphan_hashes()` 调用 `referenced_blobs()`（`crates/bakon-core/src/store/verify.rs:63-74, 216`；`store/mod.rs:593-601`），后者对每个 id 调用 `manifest(id)?`；任一份损坏清单返回 6，整个 `verify` 以错误结束，已收集的报告项与 `--size` 结果全部丢失。修复：引用集只由成功解析的清单构造，损坏清单单独报告并标记不可修复；或者返回“报告 + 错误”而不是丢弃报告。
+**A-11 `verify` 的整体失败。** `verify` 先把损坏清单收集为报告项，随后 `orphan_hashes()` 调用 `referenced_blobs()`（`crates/bakon-core/src/store/verify.rs:63-74, 216`；`store/mod.rs:593-601`），后者对每个 id 调用 `manifest(id)?`；任一份损坏清单返回 6，整个 `verify` 以错误结束，已收集的报告项与 `--size` 结果全部丢失。已修复：`verify` 只用成功解析的清单构造引用集；存在损坏清单时额外报告 `orphan_scan`（不可修复），并且 `--fix` 不回收任何对象、不改索引，避免把损坏清单仍引用的对象当成孤儿删除。上述 R-09 现在退出 6，同时保留 `manifest` 与 `orphan_scan` 报告项。
 
 **A-12 CLI 输出与全局参数。** `hook set`/`hook unset`/`config init` 没有 `cli.format` 分支（`crates/bakon-cli/src/commands.rs:321-341, 350-358`），`--format json` 下仍输出人类文本；API §5 把 `--no-hook` 与 `--no-color` 列为全局参数，但 `Cli` 只有 `--store`、`--config`、`--format`、`--lock-timeout`，全局位置传入这两个参数会退出 2。`--no-hook` 只在 `edit`/`revert` 子命令上存在。修复：状态类命令补 JSON/plain 输出；把 `no_hook` 提升为全局并与子命令合并，或修正文档；`--no-color` 当前无颜色输出，可删除或实现。
 
@@ -466,7 +466,7 @@ A-07 说明 `AbsPath` 的等价关系不是内核等价关系：词法折叠把�
 | 2 | A-08 | 存储根 0700、对象/清单/临时 0600 | 已修复：`umask` 不扩大新建目录/文件；Unix 权限测试覆盖根、布局、清单、对象、锁 |
 | 2 | A-09 | `ReadLock`/`WriteLock`；写接口收 guard | 已修复：共享锁/未持锁调用不可编译；`compile_fail,E0308` 文档用例通过 |
 | 2 | A-10 | 测试路径用 `TempDir`；脚本按平台门控 | Windows/macOS runner 全量 `cargo test` |
-| 2 | A-11 | 引用集只用有效清单；损坏清单单独报告 | 一份损坏 + 一份缺对象，`verify` 同时报告两项 |
+| 2 | A-11 | 引用集只用有效清单；损坏清单单独报告 | 已修复：一份损坏 + 一个孤儿对象，`verify` 同时报告 `manifest`/`orphan_scan`，`--fix` 不删对象 |
 | 2 | A-12 | 状态命令补 JSON；全局参数或文档 | 每个命令 `--format json` 输出可解析；`--no-hook` 全局位置可用 |
 | 2 | A-20 | 定义 `rename` 后 `fsync` 失败的提交语义；故障注入 | 失败后重跑不产生重复版本，且用户能判断是否已提交 |
 | 3 | A-13 至 A-19 | 见第 6 节 | 对应单元/端到端用例 |
@@ -481,7 +481,7 @@ A-07 说明 `AbsPath` 的等价关系不是内核等价关系：词法折叠把�
 - `cargo fmt --all --check`：通过。
 - R-01 至 R-11 与 R-14 使用真实二进制与隔离存储复现；R-12/R-13 已转为 `store` 单元回归用例。
 - 0600 文件的对象权限、只读存储、损坏清单、`u32::MAX` 清单、`.pending` 缺失清单均按第 5 节观测。
-- A-20 的退出码 9 实现后测试总数为 123；A-01 至 A-09 修复后为 138，另有 1 个 `compile_fail` 文档用例；本节的 120 是审计时基线。
+- A-20 的退出码 9 实现后测试总数为 123；A-01 至 A-09 与 A-11 修复后为 140，另有 1 个 `compile_fail` 文档用例；本节的 120 是审计时基线。
 
 ### 9.2 未覆盖
 

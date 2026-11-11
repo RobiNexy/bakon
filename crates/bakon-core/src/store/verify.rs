@@ -97,11 +97,12 @@ impl Store {
                 fixed: true,
             });
         }
+        let ids = self.list_ids()?;
         let mut manifests = Vec::new();
 
-        for id in self.list_ids()? {
-            match self.manifest(id) {
-                Ok(manifest) => manifests.push((id, manifest)),
+        for id in &ids {
+            match self.manifest(*id) {
+                Ok(manifest) => manifests.push((*id, manifest)),
                 Err(error) => report.items.push(VerifyItem {
                     kind: "manifest",
                     path: None,
@@ -112,6 +113,8 @@ impl Store {
             }
         }
         report.checked_files = manifests.len();
+        // 损坏清单的对象引用不可知；此时不能把未解析到的对象当作孤儿删除。
+        let reachability_complete = manifests.len() == ids.len();
 
         match self.read_pending() {
             Ok(entries) if !entries.is_empty() => report.items.push(VerifyItem {
@@ -235,7 +238,7 @@ impl Store {
             .map(|(id, manifest)| (manifest.path.key(), *id))
             .collect();
         if self.load_index().entries != expected {
-            let fixed = fix;
+            let fixed = fix && reachability_complete;
             if fixed {
                 self.index = Some(super::IndexCache {
                     schema: crate::SUPPORTED_SCHEMA,
@@ -247,23 +250,45 @@ impl Store {
                 kind: "index",
                 path: None,
                 ver: None,
-                detail: "index does not match manifests".into(),
+                detail: if reachability_complete {
+                    "index does not match manifests".into()
+                } else {
+                    "index cannot be verified while manifests are corrupt".into()
+                },
                 fixed,
             });
         }
 
-        let orphans = self.orphan_hashes()?;
-        if !orphans.is_empty() {
-            let fixed = fix;
-            if fixed {
-                self.reclaim_orphans(lock.expect("repairs require a write lock"))?;
+        if reachability_complete {
+            let orphans: Vec<BlobHash> = self
+                .objects()
+                .list_hashes()?
+                .difference(&unique_hashes)
+                .copied()
+                .collect();
+            if !orphans.is_empty() {
+                let fixed = fix;
+                if fixed {
+                    self.reclaim_orphan_set(lock.expect("repairs require a write lock"), &orphans)?;
+                }
+                report.items.push(VerifyItem {
+                    kind: "orphan_object",
+                    path: None,
+                    ver: None,
+                    detail: format!("{} object(s) are not referenced", orphans.len()),
+                    fixed,
+                });
             }
+        } else {
             report.items.push(VerifyItem {
-                kind: "orphan_object",
+                kind: "orphan_scan",
                 path: None,
                 ver: None,
-                detail: format!("{} object(s) are not referenced", orphans.len()),
-                fixed,
+                detail: format!(
+                    "skipped: {} manifest(s) could not be parsed",
+                    ids.len() - manifests.len()
+                ),
+                fixed: false,
             });
         }
 

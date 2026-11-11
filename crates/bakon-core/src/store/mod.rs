@@ -698,6 +698,21 @@ impl Store {
         Ok(moved)
     }
 
+    /// 回收给定的孤儿对象；调用方必须已经证明这些哈希不可达。
+    pub(crate) fn reclaim_orphan_set(
+        &self,
+        lock: &WriteLock,
+        orphans: &[BlobHash],
+    ) -> Result<usize> {
+        let mut moved = 0;
+        for hash in orphans {
+            self.move_to_trash(lock, *hash)?;
+            moved += 1;
+        }
+        remove_dir_contents(self.root.join(TRASH_DIR).as_path())?;
+        Ok(moved)
+    }
+
     /// 回收所有不在任何清单中的对象。
     pub(crate) fn reclaim_orphans(&self, lock: &WriteLock) -> Result<usize> {
         let referenced = self.referenced_blobs()?;
@@ -713,6 +728,7 @@ impl Store {
     }
 
     /// 列出不在任何清单中的对象，不改变持久状态。
+    #[cfg(test)]
     pub(crate) fn orphan_hashes(&self) -> Result<Vec<BlobHash>> {
         let referenced = self.referenced_blobs()?;
         Ok(self
@@ -1613,6 +1629,56 @@ mod tests {
         store.index = None;
 
         assert!(matches!(store.resolve(&file), Err(Error::Corrupt { .. })));
+    }
+
+    #[test]
+    fn verify_reports_other_items_when_a_manifest_is_corrupt() {
+        let (_temporary, mut store) = open_store();
+        let lock = write_lock(&mut store);
+        let good = path("verify-good");
+        let bad = path("verify-bad");
+        let prepared = store.prepare_track(&lock, &good, b"good").unwrap();
+        store.commit(&lock, prepared, None).unwrap();
+        let prepared = store.prepare_track(&lock, &bad, b"bad").unwrap();
+        let bad_commit = store.commit(&lock, prepared, None).unwrap();
+        let orphan = store.objects.put(b"orphan").unwrap();
+        fs::write(store.manifest_path(bad_commit.id()).as_path(), b"{").unwrap();
+
+        let report = store
+            .verify(VerifyOptions {
+                fix: false,
+                size: false,
+            })
+            .unwrap();
+
+        assert!(
+            report
+                .items
+                .iter()
+                .any(|item| item.kind == "manifest" && !item.fixed)
+        );
+        assert!(
+            report
+                .items
+                .iter()
+                .any(|item| item.kind == "orphan_scan" && !item.fixed)
+        );
+        assert_eq!(report.checked_files, 1);
+
+        let report = store
+            .verify_fix(
+                &lock,
+                VerifyOptions {
+                    fix: true,
+                    size: false,
+                },
+            )
+            .unwrap();
+        assert!(report.items.iter().any(|item| item.kind == "manifest"));
+        assert!(
+            store.objects().path(orphan).as_path().exists(),
+            "objects must not be deleted while reachability is incomplete"
+        );
     }
 
     #[test]
