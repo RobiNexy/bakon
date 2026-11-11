@@ -53,11 +53,22 @@ impl VerifyReport {
 impl Store {
     /// 检查全部清单、对象、索引与残留目录。`fix` 需要调用方持有排他锁。
     pub fn verify(&mut self, options: VerifyOptions) -> Result<VerifyReport> {
-        if options.fix && self.pending_path().as_path().exists() {
-            self.recover()?;
-        }
+        let stale = if options.fix && self.pending_path().as_path().exists() {
+            self.recover()?
+        } else {
+            Vec::new()
+        };
 
         let mut report = VerifyReport::default();
+        for entry in stale {
+            report.items.push(VerifyItem {
+                kind: "pending_stale",
+                path: None,
+                ver: Some(entry.version),
+                detail: format!("discarded uncommitted pending record for {}", entry.id),
+                fixed: true,
+            });
+        }
         let mut manifests = Vec::new();
 
         for id in self.list_ids()? {

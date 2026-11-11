@@ -6,8 +6,6 @@
 
 > 审计来源：[[design-audit-2026-11-10]]、[[design-audit-v1-2026-11-10]]、[[design-audit-v1-2026-11-10-recheck]]、[[design-audit-v1-2026-11-11]]；v1 设计入口：[[MODULE__bakon-v1-design]]。
 
-- P1 v1 全量审计：`init` 会把 `BAKON_STORE.*.tmp` 形状的用户文件当临时文件删除（A-01）
-- P1 v1 全量审计：恢复对缺失清单/未提交 pending 返回成功并删除 `.pending`，`verify --fix` 假成功（A-02）
 - P2 v1 全量审计：`revert` 的已匹配分支经 `Committed::apply` 写回，没有 pending 保护（A-03）
 - P2 v1 全量审计：公共 `prepare_track`/`commit` 不检查路径唯一，可产生同路径清单（A-04）
 - P2 v1 全量审计：`prune` 接收重复 `FileId` 时计数下溢/panic（A-05）

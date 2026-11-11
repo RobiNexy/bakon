@@ -395,7 +395,7 @@ pub fn verify(cli: &Cli, fix: bool, size: bool) -> Result<u8> {
     let mut store = open_store(cli)?;
     let timeout = lock_timeout(cli);
     let _guard = if fix {
-        store.begin_write(timeout)?
+        store.begin_verify(timeout)?
     } else {
         store.lock_shared(timeout)?
     };

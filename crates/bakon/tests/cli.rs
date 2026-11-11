@@ -170,6 +170,21 @@ fn init_creates_a_store_and_is_idempotent() {
 }
 
 #[test]
+fn init_does_not_delete_a_marker_shaped_user_file() {
+    let temporary = TempDir::new().unwrap();
+    let store = temporary.path().join("store");
+    fs::create_dir(&store).unwrap();
+    let user_file = store.join("BAKON_STORE.notes.tmp");
+    fs::write(&user_file, b"important user data").unwrap();
+
+    let output = run(&["init", "--store", store.to_str().unwrap()]);
+
+    assert_eq!(output.status.code(), Some(6), "stderr: {}", stderr(&output));
+    assert!(user_file.exists(), "init must never delete user data");
+    assert!(!store.join("BAKON_STORE").exists());
+}
+
+#[test]
 fn init_refuses_a_foreign_non_empty_directory() {
     let temporary = TempDir::new().unwrap();
     let store = temporary.path().join("store");
@@ -987,6 +1002,61 @@ fn uncertain_pending_commit_fsync_exits_nine_and_recovers() {
     assert_eq!(fixed.status.code(), Some(0), "stderr: {}", stderr(&fixed));
     assert_eq!(fs::read(fixture.file()).unwrap(), b"one");
     assert!(!pending.exists(), "recovery must clear the pending record");
+}
+
+#[test]
+fn verify_fix_reports_and_discards_an_uncommitted_pending_record() {
+    let fixture = Fixture::new(b"one");
+    let noop = editor_script_named(fixture.temp(), "noop.sh", "exit 0");
+    assert_eq!(fixture.edit(&noop).status.code(), Some(0));
+    let manifest = fs::read_dir(Path::new(fixture.store()).join("files"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let id = manifest.file_stem().unwrap().to_str().unwrap();
+    let pending = Path::new(fixture.store()).join(".pending");
+    fs::write(
+        &pending,
+        format!(
+            r#"{{"schema":1,"entries":[{{"id":"{id}","version":1,"old_blob":null,"new_blob":"{}"}}]}}"#,
+            "a".repeat(64)
+        ),
+    )
+    .unwrap();
+
+    let output = fixture.run(&["verify", "--fix"]);
+
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    assert!(
+        stdout(&output).contains("pending_stale"),
+        "stdout: {}",
+        stdout(&output)
+    );
+    assert!(!pending.exists());
+}
+
+#[test]
+fn verify_fix_keeps_an_unverifiable_pending_record() {
+    let fixture = Fixture::new(b"one");
+    assert_eq!(fixture.run(&["init"]).status.code(), Some(0));
+    let pending = Path::new(fixture.store()).join(".pending");
+    fs::write(
+        &pending,
+        r#"{"schema":1,"entries":[{"id":"00000000000000000000000000000000","version":1,"old_blob":null,"new_blob":"0000000000000000000000000000000000000000000000000000000000000000"}]}"#,
+    )
+    .unwrap();
+
+    let output = fixture.run(&["verify", "--fix"]);
+
+    assert_eq!(output.status.code(), Some(6), "stderr: {}", stderr(&output));
+    assert!(
+        stderr(&output).contains("has no manifest"),
+        "stderr: {}",
+        stderr(&output)
+    );
+    assert!(pending.exists(), "unverifiable pending must be kept");
 }
 
 #[cfg(all(unix, debug_assertions))]

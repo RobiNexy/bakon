@@ -64,8 +64,8 @@ $$\mathrm{projected}(S)=\{\,f\mid D(f)=\mathrm{content}(\mathrm{head}(M(f)))\,\}
 
 | ID | 结论 | 严重度 | 关联性质 |
 |---|---|---|---|
-| A-01 | `init` 把 `BAKON_STORE.*.tmp` 形状的普通文件当作自己的临时文件删除 | P1 | $\mathbf{P_2}$ |
-| A-02 | 恢复对缺失清单或未提交 pending 返回成功并删除 `.pending`；`verify --fix` 随后报告一致 | P1 | $\mathbf{P_3},\mathbf{P_4}$ |
+| A-01 | `init` 把 `BAKON_STORE.*.tmp` 形状的普通文件当作自己的临时文件删除 | P1（已修复） | $\mathbf{P_2}$ |
+| A-02 | 恢复对缺失清单或未提交 pending 返回成功并删除 `.pending`；`verify --fix` 随后报告一致 | P1（已修复） | $\mathbf{P_3},\mathbf{P_4}$ |
 | A-03 | `revert` 的“已匹配”分支经 `Committed::apply` 写回，没有 `.pending` 保护 | P2 | $\mathbf{P_4},\mathbf{P_5}$ |
 | A-04 | 公共 `prepare_track`/`commit` 不检查路径唯一，可产生两份同路径清单 | P2 | $\mathbf{P_5},\mathbf{P_9}$ |
 | A-05 | `prune` 接收重复 `FileId` 时计数下溢，debug 构建 panic | P2 | $\mathbf{P_1},\mathbf{P_6}$ |
@@ -203,7 +203,8 @@ $$\mathrm{projected}(S)=\{\,f\mid D(f)=\mathrm{content}(\mathrm{head}(M(f)))\,\}
 | 函数 | 契约 | 结论 |
 |---|---|---|
 | `begin_write` | 排他锁并恢复 | 正确；恢复失败会释放锁 |
-| `lock_shared` | 共享锁，不恢复 | 正确；与 OPS 的“任意命令启动时恢复”不一致（O-11） |
+| `begin_verify` | 排他锁但不自动恢复 | 供 `verify --fix` 先报告 `pending_stale` 再处理 `.pending` |
+| `lock_shared` | 共享锁，不恢复 | 正确；OPS 已改为“写命令启动时恢复”（O-11 已修正） |
 | `acquire` | 轮询、超时、写 holder | 基本正确；共享锁仍写打开 `.lock`，见 A-13 |
 | `write_holder` / `read_holder` | PID 诊断 | 截断重写非原子；无开始时间，见 A-16 |
 | `StoreLock::drop` | 解锁 | 正确；内核在进程崩溃时释放 |
@@ -247,9 +248,9 @@ $$\mathrm{projected}(S)=\{\,f\mid D(f)=\mathrm{content}(\mathrm{head}(M(f)))\,\}
 
 | 函数 | 契约 | 结论 |
 |---|---|---|
-| `recover` | 逐条恢复、清 pending、清 tmp/trash | 对可判定记录正确；对缺失清单/未提交版本返回成功，见 A-02 |
-| `recover_entry` | 按当前内容三路分派 | 基本正确；只找最后一个 `pending_apply`，不校验 `entry.version`/`new_blob`（A-02/O-06） |
-| `append_revert_and_apply` | salvage 后追加 revert 并写回 | 基本正确；崩溃在 `write_pending` 与 `commit` 之间会留下未提交条目，见 A-02 |
+| `recover` | 逐条恢复、清 pending、清 tmp/trash | 已按 A-02 收紧：无法证明的记录保留并退出 6；可证明未提交的记录丢弃并由 `verify --fix` 报告 |
+| `recover_entry` | 按 `entry.version` 匹配并校验 `new_blob` | 已修复：不再取最后一个 `pending_apply`；清单缺失、裁剪或不匹配时保留 `.pending` |
+| `append_revert_and_apply` | salvage 后追加 revert 并写回 | 崩溃在 `write_pending` 与 `commit` 之间会留下未提交条目；下一次按“清单头小于记录版本”判为 `pending_stale` |
 | `apply_pending` | 写回并把 Io/NotAFile 映射为 7 | 正确 |
 | `clear_pending_version` / `finish_apply` | 清版本标记与 `.pending` | 正确；`finish_apply` 只清头，不校验被应用版本（O-06） |
 | `pending_path` / `read_pending` / `write_pending` / `clear_pending` | `.pending` 读写 | 严格 schema；空文件视为空；写为原子替换 |
@@ -262,7 +263,7 @@ $$\mathrm{projected}(S)=\{\,f\mid D(f)=\mathrm{content}(\mathrm{head}(M(f)))\,\}
 |---|---|---|
 | `VerifyOptions` / `VerifyItem` / `SizeEntry` / `VerifyReport` | 报告结构 | 直接 |
 | `VerifyReport::ok` | 所有项已修复 | 正确；无法修复项保持 false |
-| `Store::verify` | 清单、pending、索引、孤儿、残留、尺寸 | 基本正确；损坏清单在孤儿扫描处整体失败，见 A-11；`--fix` 先恢复 pending，但无法判定时可能假成功，见 A-02 |
+| `Store::verify` | 清单、pending、索引、孤儿、残留、尺寸 | 基本正确；损坏清单在孤儿扫描处整体失败，见 A-11；`--fix` 用 `begin_verify` 先报告 `pending_stale`，无法证明的记录保留并退出 6（A-02 已修复） |
 
 `verify` 不检查目标文件是否等于 head；这是设计选择（外部编辑是合法状态），不是缺陷，但 OPS 的“任意命令启动时恢复”与 API 的“verify 一致”措辞需要区分“存储一致”与“投影一致”。
 
@@ -337,7 +338,7 @@ $$\mathrm{projected}(S)=\{\,f\mid D(f)=\mathrm{content}(\mathrm{head}(M(f)))\,\}
 | R5 | `recover_entry` 多处借用 `manifest.path`，可读性差 | **不成立（非缺陷）** | 借用能编译且生命周期清晰；克隆路径只会增加分配。可作为可读性重构，不进入缺陷清单 |
 | R6 | 部分 `pub` 方法缺少“调用方须持锁”文档 | **成立** | `commit`、`rename`、`set_hook`、`begin_apply`、`finish_apply` 都缺；见 A-09 |
 | R7 | `write_holder` 每次截断重写，可能被并发读到中间态 | **成立（低）** | 仅诊断用；另外设计承诺的开始时间未写入，见 A-16 |
-| R8 | `is_init_temp` 硬编码 `BAKON_STORE.` 前缀 | **成立且更严重** | 不只是常量重复：任何 `BAKON_STORE.*.tmp` 普通文件都会被删除，见 A-01 |
+| R8 | `is_init_temp` 硬编码 `BAKON_STORE.` 前缀 | **成立且更严重（已修复）** | 不只是常量重复：任何 `BAKON_STORE.*.tmp` 普通文件都会被删除，见 A-01；现在前缀由 `MARKER_FILE` 派生，严格数字匹配且不删除 |
 | R9 | 测试的 `path()` 使用 `/tmp`，Windows 会失败 | **部分成立** | 单元测试的 `/tmp` 是路径断言，Windows 上字符串断言确实会失败；实际文件 I/O 已多用 `TempDir`。更大的 Windows 障碍是 `.sh` 编辑器与 `sh -c`，见 A-10 |
 | R10 | `Committed::trim_failed` 只有布尔，诊断信息有限 | **成立（低）** | 见 A-19；建议携带失败对象/错误或日志 |
 
@@ -349,9 +350,9 @@ $$\mathrm{projected}(S)=\{\,f\mid D(f)=\mathrm{content}(\mathrm{head}(M(f)))\,\}
 
 | 编号 | 操作 | 观测 | 对应 |
 |---|---|---|---|
-| R-01 | 创建只含 `BAKON_STORE.notes.tmp`（内容为用户数据）的目录，执行 `init` | 退出 0；用户文件被删除；目录出现标记与布局 | A-01 |
+| R-01 | 创建只含 `BAKON_STORE.notes.tmp`（内容为用户数据）的目录，执行 `init` | 修复后退出 6，文件保留；修复前退出 0 且文件被删除 | A-01 |
 | R-02 | 初始化空存储，写入指向不存在 `FileId` 的合法 `.pending`，执行 `verify` | 退出 6，报告 `pending_apply` | A-02 |
-| R-03 | 对 R-02 执行 `verify --fix` | 退出 0，输出 `store is consistent`，`.pending` 被删除 | A-02 |
+| R-03 | 对 R-02 执行 `verify --fix` | 修复后退出 6，`.pending` 保留；修复前退出 0 并删除 | A-02 |
 | R-04 | `--store <不存在路径> verify` | 退出 0，输出 `store is consistent`，并创建标记、布局与 `.lock` | A-06 |
 | R-05 | 目录中有普通文件 `blocker` 与 `victim`，执行 `edit <dir>/blocker/../victim` | 内核读取该路径返回 ENOTDIR；`bakon` 退出 0 并把 `<dir>/victim` 纳管 | A-07 |
 | R-06 | 纳管 0600 文件，检查对象权限 | 对象与清单为 0664，目录为 0775（受 `umask` 影响） | A-08 |
@@ -362,14 +363,15 @@ $$\mathrm{projected}(S)=\{\,f\mid D(f)=\mathrm{content}(\mathrm{head}(M(f)))\,\}
 | R-11 | 跟踪 v0=one、v1=two、v2=three，执行 `diff <file> 1` | 比较 v0 与 v1，而帮助把第一个参数描述为 older | A-17 |
 | R-12 | 公共 API 以同一 `FileId` 两次调用 `prune([id,id])`（临时测试，已删除） | debug 构建在 `*count -= 1` 处下溢 panic | A-05 |
 | R-13 | 公共 API 对同一路径两次 `prepare_track`/`commit`（临时测试，已删除） | 两次均提交成功；`verify` 报 `duplicate_path` | A-04 |
+| R-14 | `.pending` 版本大于清单头，执行 `verify --fix` | 退出 0，报告 `pending_stale [fixed]`，`.pending` 被删除 | A-02 |
 
 ## 6. 新发现详述
 
 ### 6.1 P1
 
-**A-01 `init` 删除用户文件。** `is_init_temp` 只检查文件名以 `BAKON_STORE.` 开头、以 `.tmp` 结尾且是普通文件；`is_empty_dir` 把这样的目录视为空，`initialize` 与后续 `init` 都会调用 `remove_init_temps` 删除它（`crates/bakon-core/src/store/mod.rs:1025-1060`）。形式陈述：存在状态 $S$，其中目录 $d$ 只含普通文件 $f$，$\mathrm{name}(f)=\texttt{BAKON\_STORE.notes.tmp}$；`init(d)` 从 $S$ 到达 $S'$，且 $f\notin T(S')$。这违反 $\mathbf{P_2}$ 的“不得删除不属于本程序的普通文件”，也违反项目对“非空无标记目录”的保守原则。修复应把临时文件模式收紧为 `^BAKON_STORE\.[0-9]+\.[0-9]+\.[0-9]+\.tmp$`，并只在确认是本次初始化/标记写入产生时删除；更稳妥的是把标记临时文件放入专用的 `tmp/` 子目录。验证：上述 R-01 必须改为拒绝或保留文件。
+**A-01 `init` 删除用户文件。** `is_init_temp` 只检查文件名以 `BAKON_STORE.` 开头、以 `.tmp` 结尾且是普通文件；`is_empty_dir` 把这样的目录视为空，`initialize` 与后续 `init` 都会调用 `remove_init_temps` 删除它（`crates/bakon-core/src/store/mod.rs:1097-1150`）。形式陈述：存在状态 $S$，其中目录 $d$ 只含普通文件 $f$，$\mathrm{name}(f)=\texttt{BAKON\_STORE.notes.tmp}$；`init(d)` 从 $S$ 到达 $S'$，且 $f\notin T(S')$。这违反 $\mathbf{P_2}$ 的“不得删除不属于本程序的普通文件”，也违反项目对“非空无标记目录”的保守原则。已修复：临时文件模式收紧为 `^BAKON_STORE\.[0-9]+\.[0-9]+\.[0-9]+\.tmp$`，并且匹配项只被忽略、不再删除；非数字形状的同前缀文件按用户数据拒绝初始化。上述 R-01 现在退出 6 且保留文件。
 
-**A-02 恢复假成功并删除 `.pending`。** `recover` 对所有条目调用 `recover_entry`；后者在 `load_manifest_optional(entry.id)` 返回 `None` 时直接 `Ok(())`，在清单中没有 `pending_apply` 时也直接 `Ok(())`；随后 `recover` 无条件 `clear_pending()`（`crates/bakon-core/src/store/mod.rs:688-715, 871-877`；`store/verify.rs:55-58`）。因此 `verify --fix` 会在没有完成任何写回、也没有证明 no-op 的情况下删除唯一的恢复记录并返回 0。第二个触发路径是恢复自身崩溃：`append_revert_and_apply` 先 `write_pending(new_version)`，再 `commit`；若在两者之间崩溃，下一次恢复看到清单中没有该版本，按同样逻辑清除 `.pending`。形式陈述：存在 $S$ 使 $P(S)\neq\emptyset$、$\mathrm{pending}(M(S))=\emptyset$，而 $R(S)$ 删除 $P$ 且不改变 $D$；这与 $\mathbf{P_4}$ 的“无法完成必须保留”冲突。修复：在 `recover_entry` 中校验 `entry.version` 在清单中且 `pending_apply`、`entry.new_blob == record.blob`；无法校验时保留 `.pending` 并生成不可修复项；只有完成写回或证明目标已等于新值后才清除。增加“恢复过程崩溃”的崩溃注入测试。
+**A-02 恢复假成功并删除 `.pending`。** `recover` 对所有条目调用 `recover_entry`；后者在 `load_manifest_optional(entry.id)` 返回 `None` 时直接 `Ok(())`，在清单中没有 `pending_apply` 时也直接 `Ok(())`；随后 `recover` 无条件 `clear_pending()`（`crates/bakon-core/src/store/mod.rs:698-842, 912`；`store/verify.rs:55-67`）。因此 `verify --fix` 会在没有完成任何写回、也没有证明 no-op 的情况下删除唯一的恢复记录并返回 0。第二个触发路径是恢复自身崩溃：`append_revert_and_apply` 先 `write_pending(new_version)`，再 `commit`；若在两者之间崩溃，下一次恢复看到清单中没有该版本，按同样逻辑清除 `.pending`。形式陈述：存在 $S$ 使 $P(S)\neq\emptyset$、$\mathrm{pending}(M(S))=\emptyset$，而 $R(S)$ 删除 $P$ 且不改变 $D$；这与 $\mathbf{P_4}$ 的“无法完成必须保留”冲突。已修复：`recover_entry` 现在校验 `entry.version`、`pending_apply` 与 `entry.new_blob == record.blob`；清单缺失、版本被裁剪、blob 不匹配或目标偏离时保留 `.pending` 并退出 6。只有“版本已记录且目标等于新内容”或“清单头小于记录版本”才丢弃 `.pending`，后者由 `verify --fix` 报告为 `pending_stale`；多条记录视为损坏。上述 R-03 现在退出 6 且保留 `.pending`。
 
 ### 6.2 P2
 
@@ -399,7 +401,7 @@ $$\mathrm{projected}(S)=\{\,f\mid D(f)=\mathrm{content}(\mathrm{head}(M(f)))\,\}
 
 **A-14 版本上界。** `Manifest::validate` 只要求严格连续，不要求 `head < u32::MAX`（`crates/bakon-core/src/manifest.rs:95-146`；`types.rs:213-218`）；单版本 `u32::MAX` 被 `verify` 接受，下一次 `Ver::next` 返回 `Internal` 70。修复：把 `head == u32::MAX` 视为 `Corrupt`（不可再追加），或在 `Ver::next` 溢出时返回明确的“版本号耗尽”错误并让 `verify` 报告。
 
-**A-15 临时文件不收敛。** `write_atomic` 的临时文件位于目标目录：清单在 `files/`，索引与 `.pending` 在根目录（`crates/bakon-core/src/fsutil.rs:33-62`；`store/mod.rs:419-424, 669-676, 861-869`；清理仅见 `verify.rs:231-251`）。崩溃或删除失败会留下 `files/<id>.json.<pid>...tmp`、`index.json.*.tmp`、`.pending.*.tmp`；`verify` 只清理 `objects/tmp` 与 `trash`，`init` 只清理 `BAKON_STORE.*.tmp`。修复：统一使用专用 `tmp/` 目录，或在 `verify`/`init` 中按严格模式清理这些前缀并报告。
+**A-15 临时文件不收敛。** `write_atomic` 的临时文件位于目标目录：清单在 `files/`，索引与 `.pending` 在根目录（`crates/bakon-core/src/fsutil.rs:33-62`；`store/mod.rs:419-424, 669-676, 861-869`；清理仅见 `verify.rs:231-251`）。崩溃或删除失败会留下 `files/<id>.json.<pid>...tmp`、`index.json.*.tmp`、`.pending.*.tmp`；`verify` 只清理 `objects/tmp` 与 `trash`，`init` 为避免误删用户文件，已不再删除标记临时文件。修复：统一使用专用 `tmp/` 目录，或在 `verify`/`init` 中按严格模式清理这些前缀并报告。
 
 **A-16 锁文件元数据。** 设计说 `.lock` 记录 PID 与开始时间（`design/SEQUENCE__write-protocol-and-failure-paths.md:18`），代码只写 PID（`crates/bakon-core/src/store/mod.rs:947-957`）；`set_len(0)` 后 `writeln` 非原子，超时读者可能看到空/半截内容。仅诊断用，不影响锁语义。修复：写入 `pid start_unix` 并让 `read_holder` 解析两者；或修正文档。
 
@@ -425,7 +427,7 @@ $$\mathrm{projected}(S)=\{\,f\mid D(f)=\mathrm{content}(\mathrm{head}(M(f)))\,\}
 | O-08 | `config init` 非原子、无 `fsync`；未知 TOML 字段被静默忽略；提供 `--store` 时仍要求配置文件可解析 | P3 |
 | O-09 | `emit`/`show`/`diff` 把 broken pipe 映射为 8 并打印错误，`bakon show ...` 管道到 `head` 不符合常见预期 | P3 |
 | O-10 | Windows `shell_quote` 只双写引号；`%VAR%` 在 `cmd` 引号内仍会展开；未在 runner 验证 | P3 |
-| O-11 | 文档/API 残余：`Store::versions` 未实现；架构图仍有 `version/`、`fs2`；`OPS` 说“任意命令启动时恢复”，实际读命令不恢复；`SEQUENCE` §4 与 §8 对目录目标退出码不一致 | P3 |
+| O-11 | 文档/API 残余：`Store::versions` 未实现；架构图仍有 `version/`、`fs2` | P3 |
 | O-12 | `Store::init`/`open` 的布局修复与临时清理不持锁；并发 init 会竞争，但最终标记合法 | P3 |
 | O-13 | `rename` 删除内存旧索引键后，若 `remember` 因新键已映射而提前返回，磁盘旧键可能保留；`resolve` 仍能纠正 | P3 |
 
@@ -478,9 +480,9 @@ A-07 说明 `AbsPath` 的等价关系不是内核等价关系：词法折叠把�
 - `cargo test --workspace --all-targets`：120 个测试通过（core 57、regressions 13、cli 集成 36、cli 单元 7、crash 6、concurrency 1）。
 - `cargo clippy --workspace --all-targets -- -D warnings`：通过。
 - `cargo fmt --all --check`：通过。
-- R-01 至 R-11 使用真实二进制与隔离存储复现；R-12/R-13 使用临时集成测试复现后删除，未留在仓库。
+- R-01 至 R-11 与 R-14 使用真实二进制与隔离存储复现；R-12/R-13 使用临时集成测试复现后删除，未留在仓库。
 - 0600 文件的对象权限、只读存储、损坏清单、`u32::MAX` 清单、`.pending` 缺失清单均按第 5 节观测。
-- A-20 的退出码 9 实现后测试总数为 123；本节的 120 是审计时基线。
+- A-20 的退出码 9 实现后测试总数为 123；A-01/A-02 修复后为 130；本节的 120 是审计时基线。
 
 ### 9.2 未覆盖
 

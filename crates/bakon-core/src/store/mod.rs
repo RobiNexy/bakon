@@ -152,7 +152,6 @@ impl Store {
             Ok(_) if marker_path.is_file() => {
                 let marker = read_marker(&marker_path)?;
                 marker.validate()?;
-                remove_init_temps(&root)?;
                 ensure_layout(&root)?;
                 Ok((Self::compose(root, marker), false))
             }
@@ -201,9 +200,14 @@ impl Store {
 
     /// 取得排他写锁，并执行恢复动作（清理暂存、检查待写回标记）。
     pub fn begin_write(&mut self, timeout: Duration) -> Result<StoreLock> {
-        let guard = self.acquire(true, timeout)?;
+        let guard = self.begin_verify(timeout)?;
         self.recover()?;
         Ok(guard)
+    }
+
+    /// 取得排他锁但不自动恢复；`verify --fix` 在自己的报告流程里处理 `.pending`。
+    pub fn begin_verify(&self, timeout: Duration) -> Result<StoreLock> {
+        self.acquire(true, timeout)
     }
 
     /// 取得共享读锁。
@@ -692,13 +696,22 @@ impl Store {
         let _ = self.save_index();
     }
 
-    fn recover(&mut self) -> Result<()> {
+    /// 恢复 `.pending` 中最多一条记录。
+    ///
+    /// 返回被证明为“从未提交”的过期记录，供 `verify --fix` 报告并丢弃。
+    /// 无法证明的记录保留 `.pending` 并返回 `Corrupt`，不得猜测后继续。
+    fn recover(&mut self) -> Result<Vec<PendingEntry>> {
+        let mut stale = Vec::new();
         for entry in self.read_pending()? {
-            self.recover_entry(&entry)?;
+            match self.recover_entry(&entry)? {
+                RecoveryStep::Recovered => {}
+                RecoveryStep::Stale => stale.push(entry),
+            }
         }
         self.clear_pending()?;
         self.objects.cleanup_tmp()?;
-        remove_dir_contents(self.root.join(TRASH_DIR).as_path())
+        remove_dir_contents(self.root.join(TRASH_DIR).as_path())?;
+        Ok(stale)
     }
 
     /// 恢复一条待写回记录。
@@ -707,26 +720,89 @@ impl Store {
     /// 目标内容等于崩溃前内容或缺失：写回 pending 版本。
     /// 目标内容既非旧值也非新值：先把外部内容记为 `salvage`，再追加一个
     /// `revert` 版本并写回，保证不丢弃崩溃后的外部编辑。
-    fn recover_entry(&mut self, entry: &PendingEntry) -> Result<()> {
-        let Some(manifest) = self.load_manifest_optional(entry.id)? else {
-            return Ok(());
-        };
-        let Some(pending) = manifest
+    ///
+    /// 清单缺失、pending 版本不匹配、版本被裁剪或目标偏离且无法证明是 no-op 时，
+    /// 保留 `.pending` 并返回损坏；只有“清单头小于记录版本”或“版本已记录且目标
+    /// 已等于新内容”才判定为过期并丢弃。
+    fn recover_entry(&mut self, entry: &PendingEntry) -> Result<RecoveryStep> {
+        let manifest = self
+            .load_manifest_optional(entry.id)?
+            .ok_or_else(|| Error::Corrupt {
+                what: PENDING_FILE,
+                detail: format!("{} has no manifest", entry.id),
+            })?;
+
+        let pending = manifest
             .versions
             .iter()
-            .rev()
-            .find(|record| record.pending_apply)
-            .cloned()
-        else {
-            return Ok(());
+            .find(|record| record.ver == entry.version && record.pending_apply)
+            .cloned();
+
+        let Some(pending) = pending else {
+            if manifest.versions.iter().any(|record| record.pending_apply) {
+                return Err(Error::Corrupt {
+                    what: PENDING_FILE,
+                    detail: format!(
+                        "{} has a pending version that does not match version {} in .pending",
+                        entry.id, entry.version
+                    ),
+                });
+            }
+            if let Some(record) = manifest
+                .versions
+                .iter()
+                .find(|record| record.ver == entry.version)
+            {
+                if record.blob != entry.new_blob {
+                    return Err(Error::Corrupt {
+                        what: PENDING_FILE,
+                        detail: format!(
+                            "{} version {} has a different blob than .pending",
+                            entry.id, entry.version
+                        ),
+                    });
+                }
+                let current = read_recovery_target(&manifest.path)?;
+                if current.as_ref().map(|bytes| hash_bytes(bytes)) == Some(entry.new_blob) {
+                    return Ok(RecoveryStep::Stale);
+                }
+                return Err(Error::Corrupt {
+                    what: PENDING_FILE,
+                    detail: format!(
+                        "{} version {} is recorded without pending_apply, but the target does not match",
+                        entry.id, entry.version
+                    ),
+                });
+            }
+            if manifest.max_ver().is_none_or(|head| head < entry.version) {
+                return Ok(RecoveryStep::Stale);
+            }
+            return Err(Error::Corrupt {
+                what: PENDING_FILE,
+                detail: format!(
+                    "{} version {} was pruned or is otherwise unverifiable",
+                    entry.id, entry.version
+                ),
+            });
         };
+
+        if pending.blob != entry.new_blob {
+            return Err(Error::Corrupt {
+                what: PENDING_FILE,
+                detail: format!(
+                    "{} version {} blob does not match .pending",
+                    entry.id, entry.version
+                ),
+            });
+        }
+
         let content = self.content_for(&pending)?;
         let current = read_recovery_target(&manifest.path)?;
         let current_hash = current.as_ref().map(|bytes| hash_bytes(bytes));
 
         if current_hash == Some(pending.blob) {
             self.clear_pending_version(entry.id, pending.ver)?;
-            return Ok(());
+            return Ok(RecoveryStep::Recovered);
         }
 
         let head_is_pending = manifest
@@ -736,7 +812,7 @@ impl Store {
         if (current.is_none() || current_hash == entry.old_blob) && head_is_pending {
             self.apply_pending(&manifest.path, &content, pending.ver)?;
             self.clear_pending_version(entry.id, pending.ver)?;
-            return Ok(());
+            return Ok(RecoveryStep::Recovered);
         }
 
         if let Some(bytes) = &current
@@ -764,7 +840,8 @@ impl Store {
             current_hash,
             &content,
             &manifest.path,
-        )
+        )?;
+        Ok(RecoveryStep::Recovered)
     }
 
     fn append_revert_and_apply(
@@ -860,6 +937,12 @@ impl Store {
             return Err(Error::SchemaTooOld {
                 found: file.schema,
                 supported: SUPPORTED_SCHEMA,
+            });
+        }
+        if file.entries.len() > 1 {
+            return Err(Error::Corrupt {
+                what: PENDING_FILE,
+                detail: "multiple pending entries are not supported".into(),
             });
         }
         Ok(file.entries)
@@ -1001,6 +1084,12 @@ struct PendingEntry {
     new_blob: BlobHash,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RecoveryStep {
+    Recovered,
+    Stale,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct PendingFile {
     #[serde(default)]
@@ -1011,7 +1100,6 @@ struct PendingFile {
 
 /// 原子写入标记：临时文件 → fsync → rename → 目录 fsync。
 fn initialize(root: &AbsPath) -> Result<Marker> {
-    remove_init_temps(root)?;
     let marker = Marker::new()?;
     let mut encoded = serde_json::to_vec_pretty(&marker)
         .map_err(|error| Error::Internal(format!("cannot encode store marker: {error}")))?;
@@ -1041,29 +1129,28 @@ fn is_empty_dir(root: &AbsPath) -> Result<bool> {
 }
 
 /// 初始化标记的临时文件：崩溃可能把它们留在空目录中，不能因此拒绝整个目录。
+///
+/// 只接受 `BAKON_STORE.<pid>.<sequence>.<random>.tmp` 的严格形状；匹配的文件
+/// **只会被忽略，不会被删除**。即使与用户文件同名，最坏也是在它旁边创建存储，
+/// 不会丢掉用户数据。
 fn is_init_temp(entry: &fs::DirEntry) -> Result<bool> {
     let name = entry.file_name();
     let Some(name) = name.to_str() else {
         return Ok(false);
     };
-    Ok(name.starts_with("BAKON_STORE.")
-        && name.ends_with(".tmp")
-        && entry.file_type().map_err(Error::Io)?.is_file())
-}
-
-fn remove_init_temps(root: &AbsPath) -> Result<()> {
-    let entries = match fs::read_dir(root.as_path()) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(Error::Io(error)),
+    let prefix = format!("{MARKER_FILE}.");
+    let Some(rest) = name.strip_prefix(&prefix) else {
+        return Ok(false);
     };
-    for entry in entries {
-        let entry = entry.map_err(Error::Io)?;
-        if is_init_temp(&entry)? {
-            fs::remove_file(entry.path()).map_err(Error::Io)?;
-        }
-    }
-    Ok(())
+    let Some(rest) = rest.strip_suffix(".tmp") else {
+        return Ok(false);
+    };
+    let mut parts = rest.split('.');
+    let numeric = |part: Option<&str>| {
+        part.is_some_and(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+    };
+    let valid = numeric(parts.next()) && numeric(parts.next()) && numeric(parts.next());
+    Ok(valid && parts.next().is_none() && entry.file_type().map_err(Error::Io)?.is_file())
 }
 
 fn read_marker(path: &Path) -> Result<Marker> {
@@ -1358,18 +1445,35 @@ mod tests {
     }
 
     #[test]
-    fn init_cleans_a_crashed_marker_temp() {
+    fn init_accepts_a_crashed_marker_temp_without_deleting_it() {
         let temporary = TempDir::new().unwrap();
         let root = temporary.path().join("store");
         fs::create_dir_all(&root).unwrap();
-        fs::write(root.join("BAKON_STORE.1.2.3.tmp"), b"partial").unwrap();
+        let leftover = root.join("BAKON_STORE.1.2.3.tmp");
+        fs::write(&leftover, b"partial").unwrap();
 
         let (store, created) = Store::init(&root).unwrap();
 
         assert!(created);
         assert!(root.join(MARKER_FILE).is_file());
-        assert!(!root.join("BAKON_STORE.1.2.3.tmp").exists());
+        assert!(leftover.exists(), "init must not delete a matching temp");
         assert_eq!(store.marker().schema, SUPPORTED_SCHEMA);
+    }
+
+    #[test]
+    fn init_preserves_a_user_file_that_is_not_a_marker_temp() {
+        let temporary = TempDir::new().unwrap();
+        let root = temporary.path().join("store");
+        fs::create_dir_all(&root).unwrap();
+        let user_file = root.join("BAKON_STORE.notes.tmp");
+        fs::write(&user_file, b"important user data").unwrap();
+
+        let error = Store::init(&root).unwrap_err();
+
+        assert!(matches!(error, Error::NotAStore { .. }));
+        assert_eq!(error.exit_code(), 6);
+        assert!(user_file.exists(), "init must never delete user data");
+        assert!(!root.join(MARKER_FILE).exists());
     }
 
     #[test]
@@ -1498,5 +1602,81 @@ mod tests {
                 .unwrap()
                 .pending_apply
         );
+    }
+
+    #[test]
+    fn recovery_keeps_a_pending_record_for_a_missing_manifest() {
+        let (_temporary, mut store) = open_store();
+        let id = FileId::from_bytes([9; 16]);
+        store
+            .write_pending(&[PendingEntry {
+                id,
+                version: Ver::new(1).unwrap(),
+                old_blob: None,
+                new_blob: hash_bytes(b"lost"),
+            }])
+            .unwrap();
+
+        let error = store.recover().unwrap_err();
+
+        assert!(matches!(error, Error::Corrupt { .. }));
+        assert_eq!(error.exit_code(), 6);
+        assert!(store.pending_path().as_path().exists());
+    }
+
+    #[test]
+    fn recovery_discards_an_uncommitted_pending_record() {
+        let (_temporary, mut store) = open_store();
+        let file = path("uncommitted");
+        let prepared = store.prepare_track(&file, b"one").unwrap();
+        let committed = store.commit(prepared, None).unwrap();
+        store
+            .write_pending(&[PendingEntry {
+                id: committed.id(),
+                version: Ver::new(1).unwrap(),
+                old_blob: Some(hash_bytes(b"one")),
+                new_blob: hash_bytes(b"two"),
+            }])
+            .unwrap();
+
+        let stale = store.recover().unwrap();
+
+        assert_eq!(stale.len(), 1);
+        assert_eq!(stale[0].version, Ver::new(1).unwrap());
+        assert!(!store.pending_path().as_path().exists());
+        assert_eq!(store.manifest(committed.id()).unwrap().versions.len(), 1);
+    }
+
+    #[test]
+    fn verify_fix_reports_and_discards_an_uncommitted_pending_record() {
+        let (_temporary, mut store) = open_store();
+        let file = path("verify-uncommitted");
+        let prepared = store.prepare_track(&file, b"one").unwrap();
+        let committed = store.commit(prepared, None).unwrap();
+        store
+            .write_pending(&[PendingEntry {
+                id: committed.id(),
+                version: Ver::new(1).unwrap(),
+                old_blob: Some(hash_bytes(b"one")),
+                new_blob: hash_bytes(b"two"),
+            }])
+            .unwrap();
+
+        let report = store
+            .verify(VerifyOptions {
+                fix: true,
+                size: false,
+            })
+            .unwrap();
+
+        assert!(
+            report
+                .items
+                .iter()
+                .any(|item| item.kind == "pending_stale" && item.fixed),
+            "{:?}",
+            report.items
+        );
+        assert!(!store.pending_path().as_path().exists());
     }
 }
