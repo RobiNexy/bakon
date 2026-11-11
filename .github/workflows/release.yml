@@ -117,7 +117,7 @@ jobs:
           path: dist
           merge-multiple: true
       - name: Checksums
-        run: sha256sum dist/*.tar.gz dist/*.zip > dist/checksums.txt
+        run: cd dist && sha256sum *.tar.gz *.zip > checksums.txt
       - uses: softprops/action-gh-release@v2
         with:
           files: |
