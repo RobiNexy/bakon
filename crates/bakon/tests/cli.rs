@@ -33,6 +33,11 @@ fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
+/// `--format plain` 的固定字段：ver、time、size、source、note。
+fn plain_field(line: &str, index: usize) -> &str {
+    line.split('\t').nth(index).unwrap_or("")
+}
+
 /// 写一个把内容替换为 `body` 的编辑器脚本；路径以 `$1` 传入。
 fn editor_script(directory: &Path, body: &str) -> PathBuf {
     editor_script_named(directory, "editor.sh", body)
@@ -247,16 +252,11 @@ fn edit_tracks_then_records_the_editor_result() {
     let log_text = stdout(&log);
     let lines: Vec<&str> = log_text.lines().collect();
     assert_eq!(lines.len(), 2, "stdout: {log_text}");
-    assert!(
-        lines[0].starts_with("1\t") && lines[0].ends_with("\tedit"),
-        "{}",
-        lines[0]
-    );
-    assert!(
-        lines[1].starts_with("0\t") && lines[1].ends_with("\tbaseline"),
-        "{}",
-        lines[1]
-    );
+    assert_eq!(plain_field(lines[0], 0), "1", "{}", lines[0]);
+    assert_eq!(plain_field(lines[0], 3), "edit", "{}", lines[0]);
+    assert_eq!(plain_field(lines[0], 4), "", "{}", lines[0]);
+    assert_eq!(plain_field(lines[1], 0), "0", "{}", lines[1]);
+    assert_eq!(plain_field(lines[1], 3), "baseline", "{}", lines[1]);
 
     let baseline = fixture.run(&["show", fixture.file(), "0"]);
     assert_eq!(baseline.stdout, b"first");
@@ -317,6 +317,191 @@ fn edit_without_changes_creates_no_version() {
     );
     let log = fixture.run(&["--format", "plain", "log", fixture.file()]);
     assert_eq!(stdout(&log).lines().count(), 1);
+}
+
+#[test]
+fn edit_records_a_note_on_the_new_version() {
+    let fixture = Fixture::new(b"one");
+    let editor = editor_script(fixture.temp(), "printf 'two' > \"$1\"");
+    let output = run_with_env(
+        &[
+            "--store",
+            fixture.store(),
+            "edit",
+            fixture.file(),
+            "-m",
+            "把端口改成8843",
+        ],
+        &[("EDITOR", &editor)],
+    );
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+
+    let log = fixture.run(&["--format", "json", "log", fixture.file()]);
+    let text = stdout(&log);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 2, "{text}");
+    assert!(
+        lines[0].contains("\"note\":\"把端口改成8843\""),
+        "{}",
+        lines[0]
+    );
+    assert!(lines[1].contains("\"note\":null"), "{}", lines[1]);
+
+    let plain = fixture.run(&["--format", "plain", "log", fixture.file()]);
+    let plain_text = stdout(&plain);
+    assert_eq!(
+        plain_field(plain_text.lines().next().unwrap(), 4),
+        "把端口改成8843"
+    );
+
+    let human = fixture.run(&["log", fixture.file()]);
+    assert!(
+        stdout(&human).contains("把端口改成8843"),
+        "stdout: {}",
+        stdout(&human)
+    );
+}
+
+#[test]
+fn edit_without_changes_does_not_record_a_note() {
+    let fixture = Fixture::new(b"one");
+    let editor = editor_script(fixture.temp(), "exit 0");
+    let output = run_with_env(
+        &[
+            "--store",
+            fixture.store(),
+            "edit",
+            fixture.file(),
+            "-m",
+            "不会保存的备注",
+        ],
+        &[("EDITOR", &editor)],
+    );
+
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    assert!(
+        stderr(&output).contains("note not recorded"),
+        "stderr: {}",
+        stderr(&output)
+    );
+    let log = fixture.run(&["--format", "plain", "log", fixture.file()]);
+    assert_eq!(stdout(&log).lines().count(), 1);
+}
+
+#[test]
+fn revert_records_a_note_on_the_new_version() {
+    let fixture = Fixture::new(b"one");
+    let editor = editor_script(fixture.temp(), "printf 'two' > \"$1\"");
+    assert_eq!(fixture.edit(&editor).status.code(), Some(0));
+
+    let output = fixture.run(&["revert", fixture.file(), "0", "-m", "回退端口配置"]);
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+
+    let log = fixture.run(&["--format", "json", "log", fixture.file()]);
+    let first = stdout(&log);
+    let line = first.lines().next().unwrap();
+    assert!(line.contains("\"source\":\"revert\""), "{line}");
+    assert!(line.contains("\"note\":\"回退端口配置\""), "{line}");
+}
+
+#[test]
+fn note_can_be_shown_set_and_cleared_without_a_new_version() {
+    let fixture = Fixture::new(b"one");
+    let noop = editor_script(fixture.temp(), "exit 0");
+    assert_eq!(fixture.edit(&noop).status.code(), Some(0));
+
+    let set = fixture.run(&["note", fixture.file(), "0", "基线说明"]);
+    assert_eq!(set.status.code(), Some(0), "stderr: {}", stderr(&set));
+    let shown = fixture.run(&["note", fixture.file(), "0"]);
+    assert_eq!(shown.status.code(), Some(0), "stderr: {}", stderr(&shown));
+    assert!(stdout(&shown).contains("基线说明"), "{}", stdout(&shown));
+
+    let log = fixture.run(&["--format", "json", "log", fixture.file()]);
+    assert!(
+        stdout(&log).contains("\"note\":\"基线说明\""),
+        "{}",
+        stdout(&log)
+    );
+    assert_eq!(stdout(&log).lines().count(), 1);
+
+    let cleared = fixture.run(&["note", fixture.file(), "0", "--clear"]);
+    assert_eq!(
+        cleared.status.code(),
+        Some(0),
+        "stderr: {}",
+        stderr(&cleared)
+    );
+    let log = fixture.run(&["--format", "json", "log", fixture.file()]);
+    assert!(stdout(&log).contains("\"note\":null"), "{}", stdout(&log));
+    assert_eq!(stdout(&log).lines().count(), 1);
+}
+
+#[test]
+fn notes_survive_rename_and_prune() {
+    let fixture = Fixture::new(b"one");
+    let editor = editor_script(fixture.temp(), "printf 'two' > \"$1\"");
+    let edited = run_with_env(
+        &[
+            "--store",
+            fixture.store(),
+            "edit",
+            fixture.file(),
+            "-m",
+            "保留这条备注",
+        ],
+        &[("EDITOR", &editor)],
+    );
+    assert_eq!(edited.status.code(), Some(0), "stderr: {}", stderr(&edited));
+
+    let renamed = fixture.temp().join("renamed.txt");
+    let moved = fixture.run(&["mv", fixture.file(), renamed.to_str().unwrap()]);
+    assert_eq!(moved.status.code(), Some(0), "stderr: {}", stderr(&moved));
+    let log = fixture.run(&["--format", "json", "log", renamed.to_str().unwrap()]);
+    assert!(
+        stdout(&log).contains("\"note\":\"保留这条备注\""),
+        "{}",
+        stdout(&log)
+    );
+
+    let config = write_config(fixture.temp(), "one.toml", 1);
+    let pruned = fixture.run_config(&config, &["prune", renamed.to_str().unwrap()]);
+    assert_eq!(pruned.status.code(), Some(0), "stderr: {}", stderr(&pruned));
+    let log = fixture.run_config(
+        &config,
+        &["--format", "json", "log", renamed.to_str().unwrap()],
+    );
+    assert_eq!(stdout(&log).lines().count(), 1, "{}", stdout(&log));
+    assert!(
+        stdout(&log).contains("\"note\":\"保留这条备注\""),
+        "{}",
+        stdout(&log)
+    );
+}
+
+#[test]
+fn note_rejects_invalid_text_and_missing_versions() {
+    let fixture = Fixture::new(b"one");
+    let noop = editor_script(fixture.temp(), "exit 0");
+    assert_eq!(fixture.edit(&noop).status.code(), Some(0));
+
+    let empty = fixture.run(&["note", fixture.file(), "0", "   "]);
+    assert_eq!(empty.status.code(), Some(2), "stderr: {}", stderr(&empty));
+
+    let multiline = fixture.run(&["note", fixture.file(), "0", "line\nbreak"]);
+    assert_eq!(
+        multiline.status.code(),
+        Some(2),
+        "stderr: {}",
+        stderr(&multiline)
+    );
+
+    let missing = fixture.run(&["note", fixture.file(), "9", "ghost"]);
+    assert_eq!(
+        missing.status.code(),
+        Some(3),
+        "stderr: {}",
+        stderr(&missing)
+    );
 }
 
 #[test]
@@ -551,11 +736,8 @@ fn revert_restores_content_and_appends_a_version() {
     let text = stdout(&log);
     let lines: Vec<&str> = text.lines().collect();
     assert_eq!(lines.len(), 3, "{text}");
-    assert!(
-        lines[0].starts_with("2\t") && lines[0].ends_with("\trevert"),
-        "{}",
-        lines[0]
-    );
+    assert_eq!(plain_field(lines[0], 0), "2", "{}", lines[0]);
+    assert_eq!(plain_field(lines[0], 3), "revert", "{}", lines[0]);
 }
 
 #[test]
@@ -598,8 +780,8 @@ fn revert_force_records_salvage_before_restoring() {
     let text = stdout(&log);
     let lines: Vec<&str> = text.lines().collect();
     assert_eq!(lines.len(), 4, "{text}");
-    assert!(lines[0].ends_with("\trevert"), "{}", lines[0]);
-    assert!(lines[1].ends_with("\tsalvage"), "{}", lines[1]);
+    assert_eq!(plain_field(lines[0], 3), "revert", "{}", lines[0]);
+    assert_eq!(plain_field(lines[1], 3), "salvage", "{}", lines[1]);
 
     let salvaged = fixture.run(&["show", fixture.file(), "2"]);
     assert_eq!(salvaged.stdout, b"outside edit");
@@ -644,7 +826,7 @@ fn hook_runs_after_commit_outside_the_lock() {
 
     let record = directory.join("hook.log");
     let hook = format!(
-        "printf '%s %s\\n' \"$BAKON_VERSION\" \"$BAKON_SOURCE\" >> {}; {} --store {} log {} >/dev/null",
+        "printf '%s %s %s\\n' \"$BAKON_VERSION\" \"$BAKON_SOURCE\" \"$BAKON_NOTE\" >> {}; {} --store {} log {} >/dev/null",
         record.display(),
         env!("CARGO_BIN_EXE_bakon"),
         fixture.store(),
@@ -654,10 +836,23 @@ fn hook_runs_after_commit_outside_the_lock() {
     assert_eq!(set.status.code(), Some(0), "stderr: {}", stderr(&set));
 
     let editor = editor_script(directory, "printf 'two' > \"$1\"");
-    let output = fixture.edit(&editor);
+    let output = run_with_env(
+        &[
+            "--store",
+            fixture.store(),
+            "edit",
+            fixture.file(),
+            "-m",
+            "端口改为8843",
+        ],
+        &[("EDITOR", &editor)],
+    );
 
     assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
-    assert_eq!(fs::read_to_string(&record).unwrap().trim(), "1 edit");
+    assert_eq!(
+        fs::read_to_string(&record).unwrap().trim(),
+        "1 edit 端口改为8843"
+    );
 }
 
 #[test]

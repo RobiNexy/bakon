@@ -9,13 +9,15 @@ pub struct AbsPath(PathBuf);      // 规范化绝对路径，构造即校验
 pub struct FileId([u8; 16]);      // 随机身份，构造仅由纳管路径产生
 pub struct Ver(u32);              // 单调版本号，只能由 Ver::next 产生
 pub struct BlobHash([u8; 32]);    // 内容哈希
+pub struct Note(String);          // 单行备注：1..=500 字符，无控制字符
 ```
 
-四条约束：
+五条约束：
 
 - `FileId` 不能从路径构造，只能由 `FileId::generate()` 产生并通过唯一性检查写入。
 - `Ver::next(head)` 是唯一的递增方式；不存在「从字符串解析版本号」的入口。
 - `AbsPath` 在构造时绝对化、拒绝任何 `..`，并清理 `.`；最终目标的符号链接保留。`..` 的词法折叠与内核解析在普通文件或缺失前缀后不一致，因此必须在进入存储前由用户规范化。大小写不敏感平台用路径键比较身份。
+- `Note` 只能由 `Note::parse` 从用户输入构造，或在反序列化时按同一规则校验；空串、超过 500 字符、含控制字符或首尾空白都不是合法持久值。
 - 四个类型之间没有隐式转换，编译期阻止混用。
 
 ```rust
@@ -41,6 +43,9 @@ impl Store {
 
     /// 构造追加提交：版本号与时间在这里生成。
     pub fn prepare_commit(&self, lock: &WriteLock, id: FileId, content: &[u8], source: Source) -> Result<Prepared>;
+
+    /// 构造带备注的追加提交；备注已由 Note::parse 校验。
+    pub fn prepare_commit_with_note(&self, lock: &WriteLock, id: FileId, content: &[u8], source: Source, note: Option<Note>) -> Result<Prepared>;
 
     /// 写入对象与清单，返回提交结果。失败时持久状态或为旧值或为新值。
     /// `expected_head` 是进入编辑器前读到的 head；不一致即冲突退出。
@@ -73,6 +78,7 @@ impl Committed {
 | `prune_dry_run(&[FileId]) -> PruneReport` | 持共享锁 | 只报告，不改变持久状态 | 6 |
 | `rename(&WriteLock, FileId, AbsPath)` | 持写锁 | 更新清单 `path` 与缓存 | 4（目标已存在） |
 | `set_hook(&WriteLock, FileId, Option<String>)` | 持写锁 | 写入清单 | 8、9 |
+| `set_note(&WriteLock, FileId, Ver, Option<Note>)` | 持写锁；版本存在 | 只改该版本的 `note`，必要时调整清单 schema | 3、8、9 |
 | `begin_apply(&WriteLock, …, Ver)` / `finish_apply(&WriteLock, FileId, Ver)` | 持写锁；版本为当前 head 的后继 / 指定 pending 版本 | 校验 head、blob 与唯一 pending，再建立/清除 `.pending` 与 pending 标记 | 8、9、6 |
 | `committed(&WriteLock, FileId, Ver) -> Committed` | 持写锁，版本存在 | 构造写回句柄 | 3、6 |
 | `verify(options) -> Report` | 持共享锁 | 只读检查 | 6 |
@@ -121,12 +127,13 @@ pub enum Error {
 | 命令 | 参数 | 行为 |
 |---|---|---|
 | `bakon init` | `--store` | 创建存储目录与标记；已存在且合法则无操作 |
-| `bakon edit <file>` | `--editor <cmd>`（全局 `--no-hook`） | 首次自动纳管；编辑器退出后按需提交 |
-| `bakon log <file>` | `--format` | 最新在前；大小取自清单 |
+| `bakon edit <file>` | `--editor <cmd>`、`-m/--note <text>`（全局 `--no-hook`） | 首次自动纳管；编辑器退出后按需提交；备注只写入新版本 |
+| `bakon log <file>` | `--format` | 最新在前；大小取自清单；显示备注 |
 | `bakon diff <file> [v1] [v2]` | — | 0 个参数比较最近两版；1 个参数与它的前一版比较；2 个参数中 v1 为旧、v2 为新 |
 | `bakon show <file> <v>` | — | 原始字节输出 |
 | `bakon dump <file> <v>` | — | 与 `show` 相同，保留为管道命令名 |
-| `bakon revert <file> <v>` | `--force`（全局 `--no-hook`） | 分歧默认拒绝；`--force` 先记 `salvage` |
+| `bakon revert <file> <v>` | `--force`、`-m/--note <text>`（全局 `--no-hook`） | 分歧默认拒绝；`--force` 先记 `salvage`；备注只写入新版本 |
+| `bakon note <file> <v> [text]` | `--clear` | 省略 text 显示备注；给 text 设置或替换；`--clear` 删除 |
 | `bakon ls` | — | 排序后的路径列表 |
 | `bakon mv <old> <new>` | — | 只改映射，不动磁盘文件 |
 | `bakon prune [<file>]` | `--dry-run` | 默认按保留上限；不重写历史 |
@@ -148,8 +155,10 @@ pub enum Error {
 `log --format json` 每行一个对象：
 
 ```json
-{"ver":3,"time":"2026-11-10T12:03:11Z","size":428,"source":"edit"}
+{"ver":3,"time":"2026-11-10T12:03:11Z","size":428,"source":"edit","note":"把端口改成 8843"}
 ```
+
+没有备注时 `note` 为 `null`。`plain` 在原有 `ver`、`time`、`size`、`source` 之后追加第五个字段 `note`，无备注时为空字符串。
 
 `verify --format json`：
 
@@ -163,8 +172,9 @@ pub enum Error {
 
 | 面 | 承诺 |
 |---|---|
-| 清单与标记 `schema` | 主版本内向后兼容；升级需迁移命令 |
-| `log --format json` 字段 | 只增不删，语义不变 |
+| 清单与标记 `schema` | 主版本内向后兼容；升级需迁移命令。清单 schema 1 无备注、2 有备注；读取器接受 1 和 2 |
+| `log --format json` 字段 | 只增不删，语义不变；`note` 为新增字段 |
+| `log --format plain` 字段 | 只在末尾追加；第五列为 `note` |
 | 退出码 | 永久稳定；新增码不复用旧含义 |
 | 命令语法 | 主版本内兼容，弃用需一个次版本 |
 | 错误消息文本 | **不承诺**；脚本只能依赖退出码与 JSON |

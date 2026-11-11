@@ -12,7 +12,7 @@ use crate::{Error, Result, SUPPORTED_SCHEMA};
 /// 标记文件名。
 pub const MARKER_FILE: &str = "BAKON_STORE";
 
-/// 写入标记的工具标识，形如 `bakon/1.0`。
+/// 写入标记的工具标识，形如 `bakon/1.1`。
 pub const TOOL_ID: &str = concat!(
     "bakon/",
     env!("CARGO_PKG_VERSION_MAJOR"),
@@ -88,6 +88,6 @@ mod tests {
 
     #[test]
     fn marker_documents_its_tool_version() {
-        assert_eq!(TOOL_ID, "bakon/1.0");
+        assert_eq!(TOOL_ID, "bakon/1.1");
     }
 }

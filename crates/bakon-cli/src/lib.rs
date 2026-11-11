@@ -26,8 +26,21 @@ fn dispatch(cli: &Cli) -> Result<u8> {
     match &cli.command {
         Command::Init => commands::init(cli),
         Command::Version => commands::version(cli.format),
-        Command::Edit { file, editor } => commands::edit(cli, file, editor.as_deref()),
-        Command::Revert { file, ver, force } => commands::revert(cli, file, *ver, *force),
+        Command::Edit { file, editor, note } => {
+            commands::edit(cli, file, editor.as_deref(), note.as_deref())
+        }
+        Command::Revert {
+            file,
+            ver,
+            force,
+            note,
+        } => commands::revert(cli, file, *ver, *force, note.as_deref()),
+        Command::Note {
+            file,
+            ver,
+            text,
+            clear,
+        } => commands::note(cli, file, *ver, text.as_deref(), *clear),
         Command::Log { file } => commands::log(cli, file),
         Command::Ls => commands::ls(cli),
         Command::Path { file } => commands::path(cli, file),

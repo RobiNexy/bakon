@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::clock::now_rfc3339;
 use crate::fsutil::{WriteOutcome, remove_dir_contents, write_atomic};
-use crate::manifest::{Codec, Manifest, Source, VersionRecord};
+use crate::manifest::{Codec, Manifest, Note, Source, VersionRecord};
 use crate::object::{ObjectStore, hash_bytes};
 use crate::types::{AbsPath, BlobHash, FileId, Ver};
 use crate::{Error, Result};
@@ -341,23 +341,38 @@ impl Store {
     /// 构造追加提交；版本号与时间在这里生成。
     pub fn prepare_commit(
         &self,
+        lock: &WriteLock,
+        id: FileId,
+        content: &[u8],
+        source: Source,
+    ) -> Result<Prepared> {
+        self.prepare_commit_with_note(lock, id, content, source, None)
+    }
+
+    /// 构造带备注的追加提交；备注已由 [`Note::parse`] 校验。
+    pub fn prepare_commit_with_note(
+        &self,
         _lock: &WriteLock,
         id: FileId,
         content: &[u8],
         source: Source,
+        note: Option<Note>,
     ) -> Result<Prepared> {
         let mut manifest = self.manifest(id)?;
         let head = manifest.max_ver().ok_or_else(|| Error::Corrupt {
             what: "manifest",
             detail: format!("{id} has no versions"),
         })?;
-        let record = VersionRecord::new(
+        let mut record = VersionRecord::new(
             Ver::next(head)?,
             hash_bytes(content),
             content.len() as u64,
             now_rfc3339()?,
             source,
         );
+        if let Some(note) = note {
+            record = record.with_note(note);
+        }
         manifest.append(record);
         manifest.trim(manifest.effective_max_versions(self.default_max_versions));
         Ok(Prepared {
@@ -562,6 +577,29 @@ impl Store {
         self.save_manifest(lock, &manifest)
     }
 
+    /// 设置、替换或清除一个版本的单行备注；不创建版本、不触碰目标文件。
+    pub fn set_note(
+        &self,
+        lock: &WriteLock,
+        id: FileId,
+        version: Ver,
+        note: Option<Note>,
+    ) -> Result<()> {
+        let mut manifest = self.manifest(id)?;
+        manifest.find_checked(version)?;
+        let record = manifest
+            .versions
+            .iter_mut()
+            .find(|record| record.ver == version)
+            .ok_or_else(|| Error::Corrupt {
+                what: "manifest",
+                detail: format!("{id} lost version {version} while setting a note"),
+            })?;
+        record.note = note;
+        manifest.refresh_schema();
+        self.save_manifest(lock, &manifest)
+    }
+
     /// 按生效上限裁剪，并回收不再被任何清单引用的对象。
     pub fn prune(&mut self, lock: &WriteLock, ids: &[FileId]) -> Result<PruneReport> {
         self.prune_inner(Some(lock), ids, false)
@@ -664,6 +702,7 @@ impl Store {
             }
             let mut trimmed = manifest;
             trimmed.versions.drain(..remove_count);
+            trimmed.refresh_schema();
             self.save_manifest(lock.expect("write mode has a lock"), &trimmed)?;
 
             // 清单先行：提交后这些对象才不可达，崩溃残留最多是垃圾。
@@ -1540,7 +1579,7 @@ mod tests {
             "schema": schema,
             "uuid": "00000000-0000-4000-8000-000000000000",
             "created": "2026-11-10T12:00:00Z",
-            "tool": "bakon/1.0"
+            "tool": "bakon/1.1"
         })
         .to_string()
     }
@@ -1753,6 +1792,108 @@ mod tests {
         assert_eq!(manifest.path, file);
         assert_eq!(store.content(manifest.versions[0].blob).unwrap(), b"one");
         assert_eq!(store.content(manifest.versions[1].blob).unwrap(), b"two");
+    }
+
+    #[test]
+    fn notes_are_stored_on_versions_without_changing_history() {
+        let (_temporary, mut store) = open_store();
+        let lock = write_lock(&mut store);
+        let file = path("notes");
+        let baseline = store.prepare_track(&lock, &file, b"one").unwrap();
+        let tracked = store.commit(&lock, baseline, None).unwrap();
+
+        let next = store
+            .prepare_commit_with_note(
+                &lock,
+                tracked.id(),
+                b"two",
+                Source::Edit,
+                Some(Note::parse("把端口改成8843").unwrap()),
+            )
+            .unwrap();
+        let committed = store.commit(&lock, next, Some(tracked.version())).unwrap();
+        let manifest = store.manifest(committed.id()).unwrap();
+
+        assert_eq!(manifest.schema, crate::MANIFEST_SCHEMA);
+        assert_eq!(manifest.versions.len(), 2);
+        assert_eq!(
+            manifest.versions[1].note.as_ref().map(Note::as_str),
+            Some("把端口改成8843")
+        );
+        assert_eq!(store.content(manifest.versions[1].blob).unwrap(), b"two");
+    }
+
+    #[test]
+    fn unlimited_retention_still_upgrades_the_schema_for_a_note() {
+        let (_temporary, mut store) = open_store();
+        store.set_default_max_versions(0);
+        let lock = write_lock(&mut store);
+        let file = path("unlimited-note");
+        let baseline = store.prepare_track(&lock, &file, b"one").unwrap();
+        let tracked = store.commit(&lock, baseline, None).unwrap();
+
+        let next = store
+            .prepare_commit_with_note(
+                &lock,
+                tracked.id(),
+                b"two",
+                Source::Edit,
+                Some(Note::parse("无上限也保留备注").unwrap()),
+            )
+            .unwrap();
+        let committed = store.commit(&lock, next, Some(tracked.version())).unwrap();
+
+        let manifest = store.manifest(committed.id()).unwrap();
+        assert_eq!(manifest.schema, crate::MANIFEST_SCHEMA);
+        assert_eq!(
+            manifest.versions[1].note.as_ref().map(Note::as_str),
+            Some("无上限也保留备注")
+        );
+    }
+
+    #[test]
+    fn set_note_edits_only_the_manifest_and_restores_schema_one() {
+        let (_temporary, mut store) = open_store();
+        let lock = write_lock(&mut store);
+        let file = path("note-only");
+        let baseline = store.prepare_track(&lock, &file, b"content").unwrap();
+        let tracked = store.commit(&lock, baseline, None).unwrap();
+
+        store
+            .set_note(
+                &lock,
+                tracked.id(),
+                Ver::ZERO,
+                Some(Note::parse("baseline note").unwrap()),
+            )
+            .unwrap();
+        let manifest = store.manifest(tracked.id()).unwrap();
+        assert_eq!(manifest.schema, crate::MANIFEST_SCHEMA);
+        assert_eq!(manifest.versions.len(), 1);
+        assert_eq!(
+            manifest.versions[0].note.as_ref().map(Note::as_str),
+            Some("baseline note")
+        );
+        assert_eq!(
+            store.content(manifest.versions[0].blob).unwrap(),
+            b"content"
+        );
+
+        store
+            .set_note(&lock, tracked.id(), Ver::ZERO, None)
+            .unwrap();
+        let manifest = store.manifest(tracked.id()).unwrap();
+        assert_eq!(manifest.schema, crate::MANIFEST_MIN_SCHEMA);
+        assert!(manifest.versions[0].note.is_none());
+        assert_eq!(manifest.versions.len(), 1);
+
+        let missing = store
+            .set_note(&lock, tracked.id(), Ver::new(1).unwrap(), None)
+            .unwrap_err();
+        assert!(matches!(
+            missing,
+            Error::NoSuchVersion { ver, .. } if ver.get() == 1
+        ));
     }
 
     #[test]

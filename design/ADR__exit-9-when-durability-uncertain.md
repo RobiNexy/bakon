@@ -25,7 +25,7 @@
 
 - `Error` 增加 `DurabilityUncertain { id, version, source }`，`Error::exit_code` 返回 9；`Display` 明确说明版本可见、持久性未确认，并提示先运行 `bakon log` / `bakon verify`，不要盲目重试。
 - `fsutil::write_atomic` 返回 `WriteOutcome::{Durable, VisibleButNotDurable}`；`save_manifest` 把后者映射为 `DurabilityUncertain`，其他调用方用 `require_durable()` 映射为 8。
-- `edit`/`revert`/`prune`/`mv`/`hook`/`verify --fix` 都可能返回 9；`diff`/`show`/`log`/`ls` 不写清单，不会返回 9。退出码矩阵见 [[SEQUENCE__write-protocol-and-failure-paths]] §8。
+- `edit`/`revert`/`prune`/`mv`/`hook`/`note`/`verify --fix` 都可能返回 9；`diff`/`show`/`log`/`ls` 不写清单，不会返回 9。退出码矩阵见 [[SEQUENCE__write-protocol-and-failure-paths]] §8。
 - 钩子在 9 时不执行：钩子的副作用不应建立在一个可能被断电丢失的版本上。钩子仍然不保证执行；用户确认可见状态后可以手动运行或再次修改。
 - `revert` 在 9 时保留 `.pending`，目标文件尚未写回；下一次写命令或 `verify --fix` 继续恢复。
 - `verify` 只能确认当前可见状态一致，不能证明持久性；消息与文档明确这一点。

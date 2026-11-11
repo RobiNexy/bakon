@@ -7,7 +7,7 @@
 存储根目录必须包含标记文件 `BAKON_STORE`：
 
 ```json
-{ "schema": 1, "uuid": "…", "created": "2026-11-10T12:00:00Z", "tool": "bakon/1.0" }
+{ "schema": 1, "uuid": "…", "created": "2026-11-10T12:00:00Z", "tool": "bakon/1.1" }
 ```
 
 初始化/打开规则，按顺序判定：

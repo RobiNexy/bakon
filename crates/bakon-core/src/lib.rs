@@ -13,8 +13,14 @@ pub mod object;
 pub mod store;
 pub mod types;
 
-/// 本程序支持的存储 schema；标记与清单共用。
+/// 本程序支持的存储布局 schema；标记、索引与 `.pending` 共用。
 pub const SUPPORTED_SCHEMA: u32 = 1;
+
+/// 清单的最新 schema：1 不含备注，2 允许 `versions[].note`。
+pub const MANIFEST_SCHEMA: u32 = 2;
+
+/// 仍可读取的最旧清单 schema。
+pub const MANIFEST_MIN_SCHEMA: u32 = 1;
 
 pub use error::{Error, Result};
 pub use store::Store;

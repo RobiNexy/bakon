@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use std::time::Duration;
 
-use bakon_core::manifest::{Manifest, Source, VersionRecord};
+use bakon_core::manifest::{Manifest, Note, Source, VersionRecord};
 use bakon_core::object::hash_bytes;
 use bakon_core::store::{Committed, VerifyOptions};
 use bakon_core::{AbsPath, Error, FileId, Result, Store, Ver};
@@ -50,8 +50,9 @@ pub fn version(format: Format) -> Result<u8> {
 }
 
 /// `edit`：首次自动纳管；编辑器退出后按需提交。编辑器阶段不持锁。
-pub fn edit(cli: &Cli, file: &Path, editor: Option<&str>) -> Result<u8> {
+pub fn edit(cli: &Cli, file: &Path, editor: Option<&str>, note: Option<&str>) -> Result<u8> {
     let path = AbsPath::new(file)?;
+    let note = note.map(Note::parse).transpose()?;
     let (mut store, config) = open_edit_store(cli)?;
     let timeout = lock_timeout(cli);
 
@@ -89,6 +90,9 @@ pub fn edit(cli: &Cli, file: &Path, editor: Option<&str>) -> Result<u8> {
     let edited = read_target(&path)?;
     if hash_bytes(&edited) == content_hash {
         eprintln!("bakon: no changes to {}", path);
+        if note.is_some() {
+            eprintln!("bakon: note not recorded because no version was created");
+        }
         return Ok(0);
     }
 
@@ -97,7 +101,7 @@ pub fn edit(cli: &Cli, file: &Path, editor: Option<&str>) -> Result<u8> {
         if store.resolve(&path)? != Some(id) {
             return Err(Error::PathChanged(path));
         }
-        let prepared = store.prepare_commit(&guard, id, &edited, Source::Edit)?;
+        let prepared = store.prepare_commit_with_note(&guard, id, &edited, Source::Edit, note)?;
         let committed = store.commit(&guard, prepared, Some(head))?;
         warn_trim(&committed);
         let manifest = store.manifest(id)?;
@@ -117,9 +121,11 @@ pub fn edit(cli: &Cli, file: &Path, editor: Option<&str>) -> Result<u8> {
 }
 
 /// `revert`：恢复一个已记录版本，并把恢复本身记为新的 `revert` 版本。
-pub fn revert(cli: &Cli, file: &Path, version: u32, force: bool) -> Result<u8> {
+pub fn revert(cli: &Cli, file: &Path, version: u32, force: bool, note: Option<&str>) -> Result<u8> {
     let path = AbsPath::new(file)?;
     let ver = Ver::parse(version)?;
+    let note = note.map(Note::parse).transpose()?;
+    let note_requested = note.is_some();
     let mut store = open_store(cli)?;
     let timeout = lock_timeout(cli);
 
@@ -177,7 +183,13 @@ pub fn revert(cli: &Cli, file: &Path, version: u32, force: bool) -> Result<u8> {
             }
             (None, manifest, previous)
         } else {
-            let mut prepared = store.prepare_commit(&guard, id, &target_content, Source::Revert)?;
+            let mut prepared = store.prepare_commit_with_note(
+                &guard,
+                id,
+                &target_content,
+                Source::Revert,
+                note,
+            )?;
             prepared.set_pending(true);
             let pending_version = prepared
                 .manifest()
@@ -218,7 +230,89 @@ pub fn revert(cli: &Cli, file: &Path, version: u32, force: bool) -> Result<u8> {
                 committed.version()
             );
         }
-        None => eprintln!("bakon: {} already matches version {}", path, ver),
+        None => {
+            eprintln!("bakon: {} already matches version {}", path, ver);
+            if note_requested {
+                eprintln!("bakon: note not recorded because no version was created");
+            }
+        }
+    }
+    Ok(0)
+}
+
+/// `note`：查看、设置、替换或清除单个版本的备注。
+pub fn note(cli: &Cli, file: &Path, version: u32, text: Option<&str>, clear: bool) -> Result<u8> {
+    let path = AbsPath::new(file)?;
+    let ver = Ver::parse(version)?;
+    if clear && text.is_some() {
+        return Err(Error::Usage(
+            "--clear cannot be combined with note text".into(),
+        ));
+    }
+    let requested = text.map(Note::parse).transpose()?;
+    let mut store = open_store(cli)?;
+    let timeout = lock_timeout(cli);
+
+    if !clear && requested.is_none() {
+        let _guard = store.lock_shared(timeout)?;
+        let id = store
+            .resolve(&path)?
+            .ok_or_else(|| Error::NotManaged(path.clone()))?;
+        let manifest = store.manifest(id)?;
+        let record = find_version(&manifest, ver)?;
+        let note = record.note.as_ref().map(Note::as_str);
+        match cli.format {
+            Format::Human => match note {
+                Some(note) => emit(&format!("version {} of {}: {note}", ver.get(), path))?,
+                None => emit(&format!("version {} of {} has no note", ver.get(), path))?,
+            },
+            Format::Plain => emit(&format!(
+                "{}\t{}\t{}",
+                path.as_path().display(),
+                ver.get(),
+                note.unwrap_or("")
+            ))?,
+            Format::Json => emit(
+                &serde_json::json!({
+                    "path": path.as_path().to_string_lossy(),
+                    "ver": ver.get(),
+                    "note": note,
+                })
+                .to_string(),
+            )?,
+        }
+        return Ok(0);
+    }
+
+    let guard = store.begin_write(timeout)?;
+    let id = store
+        .resolve(&path)?
+        .ok_or_else(|| Error::NotManaged(path.clone()))?;
+    let note = if clear { None } else { requested };
+    store.set_note(&guard, id, ver, note.clone())?;
+    let value = note.as_ref().map(Note::as_str);
+    match cli.format {
+        Format::Human => {
+            if clear {
+                emit(&format!("note cleared for {} version {}", path, ver.get()))?;
+            } else {
+                emit(&format!("note set for {} version {}", path, ver.get()))?;
+            }
+        }
+        Format::Plain => emit(&format!(
+            "{}\t{}\t{}",
+            path.as_path().display(),
+            ver.get(),
+            value.unwrap_or("")
+        ))?,
+        Format::Json => emit(
+            &serde_json::json!({
+                "path": path.as_path().to_string_lossy(),
+                "ver": ver.get(),
+                "note": value,
+            })
+            .to_string(),
+        )?,
     }
     Ok(0)
 }
@@ -550,25 +644,28 @@ pub fn log(cli: &Cli, file: &Path) -> Result<u8> {
 
     match cli.format {
         Format::Human => {
-            emit("  ver  time                  size  source")?;
+            emit("  ver  time                  size  source    note")?;
             for record in manifest.versions.iter().rev() {
-                emit(&format!(
-                    "{:>5}  {:<22}{:>6}  {}",
+                let line = format!(
+                    "{:>5}  {:<22}{:>6}  {:<9}{}",
                     record.ver.get(),
                     display_time(&record.time),
                     record.size,
-                    source_name(record.source)
-                ))?;
+                    source_name(record.source),
+                    record.note.as_ref().map(Note::as_str).unwrap_or("")
+                );
+                emit(line.trim_end())?;
             }
         }
         Format::Plain => {
             for record in manifest.versions.iter().rev() {
                 emit(&format!(
-                    "{}\t{}\t{}\t{}",
+                    "{}\t{}\t{}\t{}\t{}",
                     record.ver.get(),
                     display_time(&record.time),
                     record.size,
-                    source_name(record.source)
+                    source_name(record.source),
+                    record.note.as_ref().map(Note::as_str).unwrap_or("")
                 ))?;
             }
         }
@@ -580,6 +677,7 @@ pub fn log(cli: &Cli, file: &Path) -> Result<u8> {
                         "time": display_time(&record.time),
                         "size": record.size,
                         "source": source_name(record.source),
+                        "note": record.note.as_ref().map(Note::as_str),
                     })
                     .to_string(),
                 )?;
@@ -779,20 +877,7 @@ pub fn diff(cli: &Cli, file: &Path, first: Option<u32>, second: Option<u32>) -> 
 }
 
 fn find_version(manifest: &Manifest, ver: Ver) -> Result<&VersionRecord> {
-    let latest = manifest.max_ver().ok_or_else(|| Error::Corrupt {
-        what: "manifest",
-        detail: format!("{} has no versions", manifest.id),
-    })?;
-    if ver > latest {
-        return Err(Error::NoSuchVersion { ver, latest });
-    }
-    let oldest = manifest.oldest_ver().unwrap_or(Ver::ZERO);
-    if ver < oldest {
-        return Err(Error::Pruned { ver, oldest });
-    }
-    manifest
-        .find(ver)
-        .ok_or(Error::NoSuchVersion { ver, latest })
+    manifest.find_checked(ver)
 }
 
 fn previous_version(manifest: &Manifest, ver: Ver) -> Result<Ver> {
@@ -949,6 +1034,11 @@ fn run_shell_with_env(
         command
     };
 
+    let note = manifest
+        .find(version)
+        .and_then(|record| record.note.as_ref())
+        .map(Note::as_str)
+        .unwrap_or("");
     command
         .env("BAKON_FILE", manifest.path.as_path())
         .env("BAKON_VERSION", version.get().to_string())
@@ -959,6 +1049,7 @@ fn run_shell_with_env(
                 .map(|ver| ver.get().to_string())
                 .unwrap_or_default(),
         )
+        .env("BAKON_NOTE", note)
         .env("BAKON_HOOK", "1")
         .status()
         .map_err(Error::Io)

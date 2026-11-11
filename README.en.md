@@ -6,6 +6,7 @@ Terms used throughout:
 
 - **Track**: make bakon manage a file for the first time and record its current content as version 0.
 - **Version**: the file content after one save, identified by an integer; 0 is the baseline.
+- **Note**: a one-line explanation attached to a version, such as "changed the port to 8843". A note does not change the file content or the version number.
 - **Store**: the directory where bakon keeps historical copies; by default `~/.bakon/store`.
 - **Hook**: a command that runs after a version is saved.
 - **Revert**: restore a file to an old version and append a new version.
@@ -15,6 +16,7 @@ Terms used throughout:
 - Install bakon
 - Make editing feel like your normal workflow
 - Track a file for the first time
+- Add a note to a version
 - View history, compare, and export old versions
 - Revert to an old version
 - Handle a file that was changed outside bakon
@@ -238,6 +240,61 @@ The order is: `--editor`, then `$VISUAL`, then `$EDITOR`, then the config `edito
 
 The file is tracked and `bakon log <file>` shows at least version 0; after a change it also shows version 1.
 
+## Add a note to a version
+
+### Prerequisites
+
+- The file is tracked.
+- You want the history to say *why* a change happened, not only when and how large it was.
+
+### Steps
+
+1. If you already know what you are about to change, pass the note to `edit`:
+
+   ```sh
+   bakon edit ./nginx.conf -m "changed the listen port to 8843"
+   ```
+
+   The note belongs only to the new version created by this run. If the content is unchanged after the editor exits, bakon creates no version, saves no note, and prints `note not recorded`.
+
+2. Explain a revert:
+
+   ```sh
+   bakon revert ./nginx.conf 3 -m "restore the configuration from before the port change"
+   ```
+
+3. Add, replace, or remove a note after the fact:
+
+   ```sh
+   bakon note ./nginx.conf 3 "changed the listen port to 8843"
+   bakon note ./nginx.conf 3 --clear
+   ```
+
+   `bakon note` changes only the note; it creates no version and does not touch the file on disk. You can also annotate baseline version 0 this way.
+
+4. View notes:
+
+   ```sh
+   bakon log ./nginx.conf
+   bakon note ./nginx.conf 3
+   ```
+
+   The `note` column in `log` shows each version's note; it is empty when there is none. In `--format json`, `note` is `null` when absent.
+
+5. Use the note in a hook:
+
+   Hooks receive `BAKON_NOTE`. It is an empty string when the version has no note.
+
+### Common mistakes
+
+- The note did not appear: confirm that `edit` actually created a version. No content change means no version and no note.
+- The note is too long or contains a line break: notes are single-line and at most 500 characters. An empty note, control characters, or overlong text exits 2.
+- An older bakon cannot read a manifest with notes: notes use manifest schema 2 and require bakon 1.1 or newer. Manifests without notes stay on schema 1.
+
+### Done when
+
+`bakon log <file>` explains the intent of each change; notes can be added or removed later without affecting history or content.
+
 ## View history, compare, and export old versions
 
 ### Prerequisites
@@ -252,7 +309,7 @@ The file is tracked and `bakon log <file>` shows at least version 0; after a cha
    bakon log ./app.conf
    ```
 
-   Versions are newest first. `source` says whether a version came from the initial baseline, a normal edit, a revert, or a protective `salvage`.
+   Versions are newest first. `source` says whether a version came from the initial baseline, a normal edit, a revert, or a protective `salvage`; `note` is the optional note.
 
 2. Show one version's raw content:
 
@@ -330,6 +387,14 @@ You can list versions, export any retained version, and distinguish "different" 
    ```text
    bakon: reverted ./app.conf to version 0 as version N
    ```
+
+   To explain the revert, add `-m`:
+
+   ```sh
+   bakon revert ./app.conf 0 -m "restore the configuration from before the port change"
+   ```
+
+   The note goes on the new `revert` version. If the target content already matches the current content, no version is created and the note is not saved.
 
 3. Check the file content.
 
@@ -456,6 +521,7 @@ BAKON_FILE       absolute target path
 BAKON_VERSION    new version number
 BAKON_SOURCE     edit or revert
 BAKON_PREV       previous version number; empty for the first version
+BAKON_NOTE       note on the new version; empty when there is none
 BAKON_HOOK=1     set while inside a hook, to prevent recursion
 ```
 
@@ -784,6 +850,7 @@ Confirm the `salvage` or `revert` entry exists.
 
 | Symptom | Meaning | What to do |
 |---|---|---|
+| Exit 2 | Command usage error, including an empty, overlong, or multiline note | Check the arguments; notes are single-line and at most 500 characters |
 | Exit 3 | File not tracked, version missing, or version pruned | Run `bakon log` to check the path and version |
 | Exit 4 | Lock timeout, concurrent conflict, or file changed outside | Retry later; use `revert --force` if overwriting is intended |
 | Exit 5 | Version saved, but the hook or editor failed | Fix the command or editor; the version is safe |

@@ -31,7 +31,7 @@ bakon version
 bakon --help
 ```
 
-应当看到版本号、目标平台，以及 `init`、`edit`、`log`、`diff`、`revert`、`prune`、`hook`、`verify` 等命令。
+应当看到版本号、目标平台，以及 `init`、`edit`、`log`、`diff`、`revert`、`note`、`prune`、`hook`、`verify` 等命令。
 
 ## 2. 第一次使用
 
@@ -65,10 +65,10 @@ EOF
 
 ```sh
 export EDITOR=vi
-bakon edit ./nginx.conf
+bakon edit ./nginx.conf -m "把监听端口改成 8080"
 ```
 
-编辑器打开后，把 `listen 80;` 改成 `listen 8080;`，保存退出。
+编辑器打开后，把 `listen 80;` 改成 `listen 8080;`，保存退出。`-m` 的备注会写进这次产生的新版本。
 
 如果不想改 `$EDITOR`，也可以在命令末尾指定编辑器：
 
@@ -92,12 +92,21 @@ bakon log ./nginx.conf
 应当有两行：
 
 ```text
-  ver  time                  size  source
-    1  ...                    ...  edit
+  ver  time                  size  source    note
+    1  ...                    ...  edit      把监听端口改成 8080
     0  ...                    ...  baseline
 ```
 
-新版本在前，版本号只增不减。
+新版本在前，版本号只增不减。给基线补一条备注，并确认备注可以单独查看和删除：
+
+```sh
+bakon note ./nginx.conf 0 "纳管时的原始配置"
+bakon note ./nginx.conf 0
+bakon log ./nginx.conf
+bakon note ./nginx.conf 0 --clear
+```
+
+`bakon note` 不创建新版本；执行后版本数仍然是 2。
 
 ## 3. 日常查看与比较
 
@@ -141,7 +150,7 @@ bakon log ./nginx.conf
 把文件恢复到版本 0：
 
 ```sh
-bakon revert ./nginx.conf 0
+bakon revert ./nginx.conf 0 -m "回退到端口修改前的配置"
 cat nginx.conf
 ```
 
@@ -179,17 +188,17 @@ bakon log ./nginx.conf
 让每次保存后执行一条命令。这里用写日志代替真实的 reload：
 
 ```sh
-bakon hook set ./nginx.conf 'printf "reloaded %s\n" "$BAKON_VERSION" >> hook.log'
+bakon hook set ./nginx.conf 'printf "reloaded %s (%s)\n" "$BAKON_VERSION" "$BAKON_NOTE" >> hook.log'
 ```
 
 修改一次配置：
 
 ```sh
-bakon edit ./nginx.conf
+bakon edit ./nginx.conf -m "再次修改监听端口"
 cat hook.log
 ```
 
-应当看到新版本号。钩子在版本保存成功后执行。
+应当看到新版本号和备注。钩子在版本保存成功后执行。
 
 钩子失败不会回滚版本：
 

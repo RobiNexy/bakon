@@ -26,6 +26,7 @@
 | 命令时序与失败路径 | [[SEQUENCE__write-protocol-and-failure-paths]] |
 | 归属、恢复、备份、迁移 | [[OPS__store-identity-recovery-and-retention]] |
 | 接口、CLI、退出码 | [[API__store-contract-and-cli]] |
+| 版本备注的使用与契约 | [[FEATURE__version-notes]] |
 | 重构前的缺陷清单 | [[design-audit-2026-11-10]] |
 | v1 设计与实现的再次形式化审计 | [[design-audit-v1-2026-11-10]] |
 | v1 修复后的复核 | [[design-audit-v1-2026-11-10-recheck]] |
@@ -83,7 +84,7 @@ Unix 上新建的存储根与布局目录为 `0700`，清单、对象、索引�
 1. 持锁读清单，记 `head`。
 2. `head` 与调用方记录的期望值不同则返回 `HeadChanged`（退出 4）。
 3. `put_object` 新内容。
-4. 构造新清单：`V' = V ++ [(next, blob, size, now, source, pending?)]`。
+4. 构造新清单：`V' = V ++ [(next, blob, size, now, source, pending?, note?)]`；备注来自 `-m/--note`，无备注时清单保持 schema 1。
 5. 原子替换清单。
 6. 若生效上限为 $m > 0$ 且 $|V'| > m$，进入裁剪。裁剪提交清单后，在同一写锁内回收不再被任何清单引用的对象；回收失败只留下孤儿对象，由 `verify --fix` 或下一次 `prune` 收敛。
 
@@ -101,7 +102,7 @@ Unix 上新建的存储根与布局目录为 `0700`，清单、对象、索引�
 
 1. 分歧检查：目标存在且内容不等于 head 时，无 `--force` 则退出 4。
 2. `--force` 时先追加 `salvage` 版本（记录当前磁盘内容），使覆盖可回退。
-3. 追加 `revert` 版本，`pending = true`。
+3. 追加 `revert` 版本，`pending = true`；`-m/--note` 的备注写入这个新版本。
 4. 按目标类型写回（见 [[SEQUENCE__write-protocol-and-failure-paths]] 第 4 节）。
 5. `pending = false`。
 
@@ -160,7 +161,7 @@ Unix 上新建的存储根与布局目录为 `0700`，清单、对象、索引�
 
 | 层级 | 内容 |
 |---|---|
-| 单元 | 编号、裁剪后缀、保留三态、路径规范化、diff 边界 |
+| 单元 | 编号、裁剪后缀、保留三态、路径规范化、diff 边界、备注校验与 schema 切换 |
 | 属性测试 | 生成任意操作序列（纳管、提交、裁剪、回退、改名、强制覆盖），断言 $\mathbf{S_1}$ 至 $\mathbf{S_8}$ |
 | 崩溃注入 | 持久化动作在 fsync/rename 之后经过崩溃点；debug 构建读取 `BAKON_TEST_CRASH_AFTER=n` 并在第 $n$ 个点终止进程。测试枚举全部点，重开后断言「可读、可 verify、恢复幂等」 |
 | 并发 | 两个进程同时提交同一文件，断言恰好一个成功、另一个退出 4；编辑器会话期间其他命令不被阻塞 |
@@ -207,6 +208,7 @@ Unix 上新建的存储根与布局目录为 `0700`，清单、对象、索引�
 | 锁等待 | 无限阻塞无提示 | 2 秒后退出 4 并给出持有者 |
 | 裁剪 | 重写 git 历史 | 截断清单后缀 |
 | `index.json` | 事实来源之一 | 纯缓存，可丢 |
+| 版本备注 | 无 | 可选单行备注；`edit -m`、`revert -m`、`note` |
 | 退出码 | 1/2/3/4/5/6/70 | 增 7（未写回）、8（IO/权限）、9（已提交但持久性未确认），1 仅用于 diff |
 | 旧历史 | — | 不自动迁移，旧目录保留 |
 

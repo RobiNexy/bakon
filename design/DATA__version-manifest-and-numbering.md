@@ -8,14 +8,14 @@
 
 ```json
 {
-  "schema": 1,
+  "schema": 2,
   "id": "6f1c0d92b7a34e51a0f4d2b8c9e77135",
   "path": "/etc/nginx/nginx.conf",
   "retention": { "max_versions": 100 },
   "hook": "systemctl reload nginx",
   "versions": [
     { "ver": 0, "blob": "…", "size": 412, "codec": "deflate", "time": "2026-11-10T12:00:00Z", "source": "baseline" },
-    { "ver": 1, "blob": "…", "size": 428, "codec": "deflate", "time": "2026-11-10T12:03:11Z", "source": "edit" }
+    { "ver": 1, "blob": "…", "size": 428, "codec": "deflate", "time": "2026-11-10T12:03:11Z", "source": "edit", "note": "把端口从 80 改成 8843" }
   ]
 }
 ```
@@ -33,9 +33,24 @@
 | `versions[].codec` | 是 | 对象编码名 |
 | `versions[].time` | 是 | 提交时间，UTC |
 | `versions[].source` | 是 | `baseline` / `edit` / `revert` |
+| `versions[].note` | 否 | 单行备注；schema 2 起可用 |
 | `versions[].pending_apply` | 否 | 仅 `revert` 用；`true` 表示目标文件尚未写回 |
 
 时间必须是合法 UTC；不要求严格递增，因为系统墙钟可能回拨，版本顺序只由 `ver` 决定。`pending_apply` 只允许出现在 `source = revert` 的头版本上。
+
+### 备注
+
+`versions[].note` 是可选的单行注解，用来记录「为什么改」。约束在 `Note` newtype 中统一定义，读写两侧共用：
+
+- 去掉首尾空白后必须非空；
+- 最多 500 个字符（Unicode scalar value，不是字节）；
+- 不含任何控制字符，因此不能换行或包含制表符。
+
+备注不是版本事实：版本号、内容哈希、大小、时间、来源仍由各自字段唯一决定；`bakon note` 可以修改或删除备注，这不创建版本，也不改变目标文件。
+
+清单 schema 分两档：1 不含备注，2 允许备注。读取器接受 1 和 2；写入器在没有备注时保持 1，第一次写入备注时升级为 2，所有备注消失（被清除或随版本裁剪）后降回 1。标记文件、`index.json` 与 `.pending` 的 schema 仍为 1，与本字段无关。
+
+旧版本程序无法读取 schema 2 清单：`note` 是未知字段，会按清单损坏退出 6。反向兼容（新程序读旧数据）成立；前向兼容不在承诺范围内。没有备注的清单保持 schema 1，因此旧程序仍可读取这些历史。
 
 `index.json` 是派生缓存：`{ "schema": 1, "entries": { "<abs path>": "<id>" } }`。它的唯一作用是让路径查找不必扫描全部清单。
 

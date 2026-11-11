@@ -24,9 +24,9 @@ $$S = (M, O, I, D, X)$$
 
 清单 $\mathrm{Manifest} = (id, path, cfg, V)$，其中 $cfg = (max, hook)$，$V = (v_0, \ldots, v_{n-1})$ 为按版本号升序的版本记录：
 
-$$v_k = (\mathrm{ver}, \mathrm{blob}, \mathrm{size}, \mathrm{time}, \mathrm{source}, \mathrm{pending})$$
+$$v_k = (\mathrm{ver}, \mathrm{blob}, \mathrm{size}, \mathrm{time}, \mathrm{source}, \mathrm{pending}, \mathrm{note})$$
 
-派生量：$\mathrm{head}(m) = v_{n-1}$（$n \ge 1$），$\mathrm{maxver}(m) = \mathrm{ver}(v_{n-1})$。
+派生量：$\mathrm{head}(m) = v_{n-1}$（$n \ge 1$），$\mathrm{maxver}(m) = \mathrm{ver}(v_{n-1})$。$\mathrm{note}$ 是可选注解，不是版本事实；它可以被 `bakon note` 单独修改，不影响其他分量。
 
 ## 3. 操作与原子片段
 
@@ -43,6 +43,7 @@ $$v_k = (\mathrm{ver}, \mathrm{blob}, \mathrm{size}, \mathrm{time}, \mathrm{sour
 | 纳管 | 生成 $id$、$\mathrm{Put}_O$（基线内容）、$\mathrm{Put}_M$（含 $v_0$）、更新 $I$ |
 | 提交 | 选择来源内容、$\mathrm{Put}_O$、$\mathrm{Put}_M$（追加 $v_n$）、更新 $I$ |
 | 回退 | 读 $\mathrm{head}$、$\mathrm{Put}_O$、$\mathrm{Put}_M$（追加 $v_n$ 且 $\mathrm{pending}=1$）、$\mathrm{Write}_D$、$\mathrm{Put}_M$（$\mathrm{pending}=0$） |
+| 备注 | 读 $V$、$\mathrm{Put}_M$（只改 $v_k$ 的 $\mathrm{note}$，必要时切换清单 schema） |
 | 裁剪 | 读 $V$、$\mathrm{Put}_M$（截断后缀）、移动并删除无引用对象 |
 | 改名 | $\mathrm{Put}_M$（改 $path$）、更新 $I$ |
 | 读 | 无持久化片段 |

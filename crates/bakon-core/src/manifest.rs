@@ -9,10 +9,13 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::types::{AbsPath, BlobHash, FileId, Ver};
-use crate::{Error, Result, SUPPORTED_SCHEMA};
+use crate::{Error, MANIFEST_MIN_SCHEMA, MANIFEST_SCHEMA, Result};
 
 /// 未配置保留上限时的全局默认；`0` 表示不限制。
 pub const DEFAULT_MAX_VERSIONS: u32 = 100;
+
+/// 备注的最大字符数（Unicode scalar value，不是字节）。
+pub const MAX_NOTE_CHARS: usize = 500;
 
 /// 一个被管理文件的完整历史。
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -32,7 +35,7 @@ impl Manifest {
     /// 纳管时创建只含基线版本的清单。
     pub fn baseline(id: FileId, path: AbsPath, baseline: VersionRecord) -> Self {
         Self {
-            schema: SUPPORTED_SCHEMA,
+            schema: MANIFEST_MIN_SCHEMA,
             id,
             path,
             retention: Retention::Inherit,
@@ -57,6 +60,31 @@ impl Manifest {
         self.versions.iter().find(|record| record.ver == ver)
     }
 
+    /// 区分「从未存在」与「已被裁剪」的版本查找。
+    pub fn find_checked(&self, ver: Ver) -> Result<&VersionRecord> {
+        let latest = self.max_ver().ok_or_else(|| Error::Corrupt {
+            what: "manifest",
+            detail: format!("{} has no versions", self.id),
+        })?;
+        if ver > latest {
+            return Err(Error::NoSuchVersion { ver, latest });
+        }
+        let oldest = self.oldest_ver().unwrap_or(Ver::ZERO);
+        if ver < oldest {
+            return Err(Error::Pruned { ver, oldest });
+        }
+        self.find(ver).ok_or(Error::NoSuchVersion { ver, latest })
+    }
+
+    /// 让 schema 与备注内容保持一致：有备注用最新 schema，无备注回到最旧 schema。
+    pub(crate) fn refresh_schema(&mut self) {
+        self.schema = if self.versions.iter().any(|record| record.note.is_some()) {
+            MANIFEST_SCHEMA
+        } else {
+            MANIFEST_MIN_SCHEMA
+        };
+    }
+
     /// 追加版本；递增约束由 [`Ver::next`] 保证，这里只检查不倒退。
     pub fn append(&mut self, record: VersionRecord) {
         debug_assert!(
@@ -68,14 +96,14 @@ impl Manifest {
 
     /// 保留最新 `max_versions` 个版本；`0` 表示不限制。
     pub fn trim(&mut self, max_versions: u32) {
-        if max_versions == 0 {
-            return;
+        if max_versions > 0 {
+            let keep = max_versions as usize;
+            if self.versions.len() > keep {
+                let excess = self.versions.len() - keep;
+                self.versions.drain(..excess);
+            }
         }
-        let keep = max_versions as usize;
-        if self.versions.len() > keep {
-            let excess = self.versions.len() - keep;
-            self.versions.drain(..excess);
-        }
+        self.refresh_schema();
     }
 
     /// 生效上限：文件级配置优先，缺省取全局默认，`0` 表示不限制。
@@ -93,16 +121,16 @@ impl Manifest {
 
     /// schema 门与结构校验；任何不符都拒绝解析结果。
     pub fn validate(&self) -> Result<()> {
-        if self.schema > SUPPORTED_SCHEMA {
+        if self.schema > MANIFEST_SCHEMA {
             return Err(Error::SchemaTooNew {
                 found: self.schema,
-                supported: SUPPORTED_SCHEMA,
+                supported: MANIFEST_SCHEMA,
             });
         }
-        if self.schema < SUPPORTED_SCHEMA {
+        if self.schema < MANIFEST_MIN_SCHEMA {
             return Err(Error::SchemaTooOld {
                 found: self.schema,
-                supported: SUPPORTED_SCHEMA,
+                supported: MANIFEST_SCHEMA,
             });
         }
         if self.versions.is_empty() {
@@ -158,6 +186,15 @@ impl Manifest {
                     detail: format!(
                         "{} version {} timestamp is not UTC: {}",
                         self.id, record.ver, record.time
+                    ),
+                });
+            }
+            if record.note.is_some() && self.schema < MANIFEST_SCHEMA {
+                return Err(Error::Corrupt {
+                    what: "manifest",
+                    detail: format!(
+                        "{} version {} has a note in schema {}",
+                        self.id, record.ver, self.schema
                     ),
                 });
             }
@@ -245,6 +282,8 @@ pub struct VersionRecord {
     pub codec: Codec,
     pub time: String,
     pub source: Source,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<Note>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub pending_apply: bool,
 }
@@ -258,9 +297,78 @@ impl VersionRecord {
             codec: Codec::Deflate,
             time,
             source,
+            note: None,
             pending_apply: false,
         }
     }
+
+    /// 附加备注；输入已经过 [`Note::parse`] 校验。
+    pub fn with_note(mut self, note: Note) -> Self {
+        self.note = Some(note);
+        self
+    }
+}
+
+/// 已校验的单行备注：去掉首尾空白后 1 到 [`MAX_NOTE_CHARS`] 个字符，且不含控制字符。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct Note(String);
+
+impl Note {
+    /// 解析用户输入；首尾空白会被去掉。
+    pub fn parse(input: &str) -> Result<Self> {
+        let trimmed = input.trim();
+        check_note(trimmed).map_err(Error::Usage)?;
+        Ok(Self(trimmed.to_owned()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for Note {
+    type Error = Error;
+
+    /// 反序列化路径更严格：清单里保存的备注必须已经是规范化形式。
+    fn try_from(value: String) -> Result<Self> {
+        if value != value.trim() {
+            return Err(Error::Corrupt {
+                what: "note",
+                detail: "has leading or trailing whitespace".into(),
+            });
+        }
+        check_note(&value).map_err(|detail| Error::Corrupt {
+            what: "note",
+            detail,
+        })?;
+        Ok(Self(value))
+    }
+}
+
+impl From<Note> for String {
+    fn from(note: Note) -> Self {
+        note.0
+    }
+}
+
+fn check_note(value: &str) -> std::result::Result<(), String> {
+    if value.is_empty() {
+        return Err("note cannot be empty".into());
+    }
+    let count = value.chars().count();
+    if count > MAX_NOTE_CHARS {
+        return Err(format!(
+            "note is {count} characters; the limit is {MAX_NOTE_CHARS}"
+        ));
+    }
+    if let Some(character) = value.chars().find(|character| character.is_control()) {
+        return Err(format!(
+            "note contains control character U+{:04X}; notes are single-line",
+            u32::from(character)
+        ));
+    }
+    Ok(())
 }
 
 fn is_false(value: &bool) -> bool {
@@ -423,11 +531,66 @@ mod tests {
     #[test]
     fn schema_gate_is_enforced_on_read() {
         let mut manifest = manifest_with(&[0]);
-        manifest.schema = SUPPORTED_SCHEMA + 1;
+        manifest.schema = MANIFEST_SCHEMA + 1;
         assert!(matches!(
             manifest.validate(),
             Err(Error::SchemaTooNew { .. })
         ));
+
+        manifest.schema = MANIFEST_MIN_SCHEMA - 1;
+        assert!(matches!(
+            manifest.validate(),
+            Err(Error::SchemaTooOld { .. })
+        ));
+    }
+
+    #[test]
+    fn notes_round_trip_and_require_schema_two() {
+        let mut manifest = manifest_with(&[0, 1]);
+        manifest.versions[1].note = Some(Note::parse("把端口改成8843").unwrap());
+        manifest.refresh_schema();
+
+        assert_eq!(manifest.schema, MANIFEST_SCHEMA);
+        let value = serde_json::to_value(&manifest).unwrap();
+        assert_eq!(value["schema"], MANIFEST_SCHEMA);
+        assert_eq!(value["versions"][1]["note"], "把端口改成8843");
+        assert!(value["versions"][0].get("note").is_none());
+
+        let parsed: Manifest = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            parsed.versions[1].note.as_ref().map(Note::as_str),
+            Some("把端口改成8843")
+        );
+
+        parsed.clone().validate().unwrap();
+        let mut old_schema = parsed;
+        old_schema.schema = MANIFEST_MIN_SCHEMA;
+        assert!(matches!(old_schema.validate(), Err(Error::Corrupt { .. })));
+    }
+
+    #[test]
+    fn note_validation_trims_and_rejects_bad_input() {
+        assert_eq!(Note::parse("  hello  ").unwrap().as_str(), "hello");
+        assert!(matches!(Note::parse("   "), Err(Error::Usage(_))));
+        assert!(matches!(Note::parse("a\nb"), Err(Error::Usage(_))));
+        assert!(matches!(Note::parse("a\tb"), Err(Error::Usage(_))));
+
+        let too_long = "x".repeat(MAX_NOTE_CHARS + 1);
+        assert!(matches!(Note::parse(&too_long), Err(Error::Usage(_))));
+
+        let at_limit = "x".repeat(MAX_NOTE_CHARS);
+        assert_eq!(Note::parse(&at_limit).unwrap().as_str(), at_limit);
+    }
+
+    #[test]
+    fn invalid_stored_notes_are_rejected_by_deserialization() {
+        let mut value = serde_json::to_value(manifest_with(&[0])).unwrap();
+        value["versions"][0]["note"] = serde_json::json!("line\nbreak");
+        assert!(serde_json::from_value::<Manifest>(value).is_err());
+
+        let mut value = serde_json::to_value(manifest_with(&[0])).unwrap();
+        value["versions"][0]["note"] = serde_json::json!(" padded ");
+        assert!(serde_json::from_value::<Manifest>(value).is_err());
     }
 
     #[test]

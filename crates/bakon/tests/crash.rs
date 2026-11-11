@@ -261,7 +261,10 @@ fn revert_survives_a_crash_at_every_durability_point() {
 
         let content = fs::read(&case.file).unwrap();
         assert!(content == b"one" || content == b"two", "unexpected content");
-        if log.lines().any(|line| line.ends_with("\trevert")) {
+        if log
+            .lines()
+            .any(|line| line.split('\t').nth(3) == Some("revert"))
+        {
             assert_eq!(
                 content, b"one",
                 "a recorded revert must be applied on recovery"

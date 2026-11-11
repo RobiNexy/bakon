@@ -64,6 +64,9 @@ pub enum Command {
         /// Editor command for this invocation; overrides $VISUAL, $EDITOR and config
         #[arg(long, value_name = "CMD")]
         editor: Option<String>,
+        /// Note describing what changed; stored on the new version
+        #[arg(short = 'm', long, value_name = "TEXT")]
+        note: Option<String>,
     },
     /// Restore a recorded version and record the restore as a new version
     Revert {
@@ -74,6 +77,21 @@ pub enum Command {
         /// Record the current divergent content as a salvage version first
         #[arg(long)]
         force: bool,
+        /// Note describing why; stored on the new version
+        #[arg(short = 'm', long, value_name = "TEXT")]
+        note: Option<String>,
+    },
+    /// Show, set, replace or clear the note on a recorded version
+    Note {
+        /// Tracked file
+        file: PathBuf,
+        /// Version number
+        ver: u32,
+        /// New note text; omit to show the current note
+        text: Option<String>,
+        /// Remove the note
+        #[arg(long, conflicts_with = "text")]
+        clear: bool,
     },
     /// List recorded versions, newest first
     Log {
