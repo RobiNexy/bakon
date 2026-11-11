@@ -60,6 +60,9 @@ pub enum Command {
         /// Skip the per-file hook
         #[arg(long)]
         no_hook: bool,
+        /// Editor command for this invocation; overrides $VISUAL, $EDITOR and config
+        #[arg(long, value_name = "CMD")]
+        editor: Option<String>,
     },
     /// Restore a recorded version and record the restore as a new version
     Revert {

@@ -50,7 +50,7 @@ pub fn version(format: Format) -> Result<u8> {
 }
 
 /// `edit`：首次自动纳管；编辑器退出后按需提交。编辑器阶段不持锁。
-pub fn edit(cli: &Cli, file: &Path, no_hook: bool) -> Result<u8> {
+pub fn edit(cli: &Cli, file: &Path, no_hook: bool, editor: Option<&str>) -> Result<u8> {
     let path = AbsPath::new(file)?;
     let (mut store, config) = open_store_with(cli)?;
     let timeout = lock_timeout(cli);
@@ -85,7 +85,7 @@ pub fn edit(cli: &Cli, file: &Path, no_hook: bool) -> Result<u8> {
         }
     };
 
-    run_editor(&path, &editor_command(&config))?;
+    run_editor(&path, &editor_command(&config, editor))?;
     let edited = read_target(&path)?;
     if hash_bytes(&edited) == content_hash {
         eprintln!("bakon: no changes to {}", path);
@@ -359,7 +359,7 @@ pub fn config(cli: &Cli, action: ConfigAction) -> Result<u8> {
         ConfigAction::Show => {
             let config = config::load(&path)?;
             let store = store_path(cli, &config)?;
-            let editor = editor_command(&config);
+            let editor = editor_command(&config, None);
             let max_versions = config.max_versions();
             let line = match cli.format {
                 Format::Human => format!(
@@ -998,8 +998,11 @@ fn store_path(cli: &Cli, config: &Config) -> Result<PathBuf> {
     Ok(home.join(".bakon").join("store"))
 }
 
-/// 编辑器优先级：`$VISUAL` > `$EDITOR` > 配置 `editor` > `vi`。
-fn editor_command(config: &Config) -> String {
+/// 编辑器优先级：`--editor` > `$VISUAL` > `$EDITOR` > 配置 `editor` > `vi`。
+fn editor_command(config: &Config, override_editor: Option<&str>) -> String {
+    if let Some(editor) = override_editor.filter(|value| !value.trim().is_empty()) {
+        return editor.to_owned();
+    }
     env::var("VISUAL")
         .ok()
         .filter(|value| !value.trim().is_empty())

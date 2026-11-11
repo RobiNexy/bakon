@@ -101,7 +101,7 @@ pub enum Error {
 | 命令 | 参数 | 行为 |
 |---|---|---|
 | `bakon init` | `--store` | 创建存储目录与标记；已存在且合法则无操作 |
-| `bakon edit <file>` | `--no-hook` | 首次自动纳管；编辑器退出后按需提交 |
+| `bakon edit <file>` | `--no-hook`、`--editor <cmd>` | 首次自动纳管；编辑器退出后按需提交 |
 | `bakon log <file>` | `--format` | 最新在前；大小取自清单 |
 | `bakon diff <file> [v1] [v2]` | — | 0 个参数比较最近两版；1 个参数与其前一版比较 |
 | `bakon show <file> <v>` | — | 原始字节输出 |
@@ -119,7 +119,7 @@ pub enum Error {
 
 全局：`--store`、`--config`、`--format human|plain|json`、`--no-color`、`--no-hook`、`--lock-timeout`。
 
-`edit` 的编辑器取 `$VISUAL` → `$EDITOR` → 配置 `editor` → `vi`；诊断与进度走 stderr，stdout 只放数据。
+`edit` 的编辑器取 `--editor` → `$VISUAL` → `$EDITOR` → 配置 `editor` → `vi`；诊断与进度走 stderr，stdout 只放数据。
 
 配置文件位置：`--config` > `$BAKON_CONFIG` > `$BAKON_HOME/config.toml` > `$XDG_CONFIG_HOME/bakon/config.toml` > `~/.config/bakon/config.toml`。v1 不读取 0.x 的 `~/.bakon/config.toml`，避免沿用指向旧 `repo/` 的 `store`。
 

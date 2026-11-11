@@ -133,7 +133,7 @@ fn version_reports_the_build_target() {
 
     assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
     assert!(
-        stdout(&output).starts_with("bakon 1.0.0 ("),
+        stdout(&output).starts_with(&format!("bakon {} (", env!("CARGO_PKG_VERSION"))),
         "stdout: {}",
         stdout(&output)
     );
@@ -145,7 +145,10 @@ fn version_supports_json() {
     let text = stdout(&output);
 
     assert_eq!(output.status.code(), Some(0));
-    assert!(text.contains("\"version\":\"1.0.0\""), "stdout: {text}");
+    assert!(
+        text.contains(&format!("\"version\":\"{}\"", env!("CARGO_PKG_VERSION"))),
+        "stdout: {text}"
+    );
     assert!(text.contains("\"target\":\""), "stdout: {text}");
 }
 
@@ -234,6 +237,19 @@ fn edit_tracks_then_records_the_editor_result() {
 
     let latest = fixture.run(&["show", fixture.file(), "1"]);
     assert_eq!(latest.stdout, b"second");
+}
+
+#[test]
+fn edit_accepts_an_editor_flag() {
+    let fixture = Fixture::new(b"first");
+    let editor = editor_script(fixture.temp(), "printf 'second' > \"$1\"");
+
+    let output = fixture.run(&["edit", fixture.file(), "--editor", editor.to_str().unwrap()]);
+
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    assert_eq!(fs::read(fixture.file()).unwrap(), b"second");
+    let log = fixture.run(&["--format", "plain", "log", fixture.file()]);
+    assert_eq!(stdout(&log).lines().count(), 2);
 }
 
 #[test]

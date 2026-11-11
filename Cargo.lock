@@ -60,7 +60,7 @@ dependencies = [
 
 [[package]]
 name = "bakon"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "bakon-cli",
  "tempfile",
@@ -68,7 +68,7 @@ dependencies = [
 
 [[package]]
 name = "bakon-cli"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "bakon-core",
  "clap",
@@ -81,7 +81,7 @@ dependencies = [
 
 [[package]]
 name = "bakon-core"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "flate2",
  "rand",

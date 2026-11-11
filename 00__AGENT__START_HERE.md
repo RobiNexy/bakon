@@ -30,6 +30,7 @@ You are an agent helping maintain this project. This is the only entry point. Lo
 | Solve a hard algorithm, protocol, concurrency, type-system or architecture problem, or judge whether a claim holds | [[AGENT__procedure__formal-problem-solving]] |
 | Write or review Go code, or choose between Go mechanisms | [[AGENT__procedure__go-engineering]] |
 | Write or review Rust code, or choose between Rust ownership and abstraction options | [[AGENT__procedure__rust-engineering]] |
+| Write or rewrite a README, user manual or installation guide | [[AGENT__procedure__writing-user-manual]] |
 | Work on the v1 store, CLI, or Rust crates | [[MODULE__bakon-v1-design]] |
 | Tidy the knowledge base, or `journal/` has more than 20 entries | [[AGENT__procedure__compaction]] |
 | Work in a freshly installed project | [[AGENT__procedure__first_session]] |
