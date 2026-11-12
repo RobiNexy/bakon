@@ -15,15 +15,15 @@ Terms used throughout:
 
 ## Why not just use Git?
 
-Bakon manages "the save history of one config file", not "the commit history of a code repository". Git has several mismatches:
+bakon manages "the save history of one config file", not "the commit history of a code repository". Git has several mismatches:
 
-- Git records repository snapshots, not a per-file stream. Every save needs `add` and `commit` plus a message; if you forget, there is no version. Bakon records automatically when `edit` returns, and version numbers are plain integers.
-- Git needs a repository boundary and a working tree. `nginx.conf` and `/etc/hosts` often live in different places; creating a repository for each file complicates layout and backups. Bakon keeps one store and a path map.
-- Reverting in Git is a new commit, but pruning old history requires rewriting and `gc`; Bakon's revert also appends a version, and pruning only truncates its own manifest without touching unrelated files.
-- Git is an external runtime dependency and is affected by `GIT_DIR`, `GIT_WORK_TREE`, and similar variables. Bakon is one binary, needs no Git, and calls no external commands.
+- Git records repository snapshots, not a per-file stream. Every save needs `add` and `commit` plus a message; if you forget, there is no version. bakon records automatically when `edit` returns, and version numbers are plain integers.
+- Git needs a repository boundary and a working tree. `nginx.conf` and `/etc/hosts` often live in different places; creating a repository for each file complicates layout and backups. bakon keeps one store and a path map.
+- Reverting in Git is a new commit, but pruning old history requires rewriting and `gc`; bakon's revert also appends a version, and pruning only truncates its own manifest without touching unrelated files.
+- Git is an external runtime dependency and is affected by `GIT_DIR`, `GIT_WORK_TREE`, and similar variables. bakon is one binary, needs no Git, and calls no external commands.
 - Backup and restore mean copying one directory; no packfiles, refs, reflog, or fsck.
 
-The trade-offs are real: Bakon does not do collaboration, remotes, signing, or merge, and it does not use Git's delta compression. Use Git for those. Bakon is not a Git replacement; it only covers single-machine, single-file history. Version 0.x did use Git as a backend; pruning there had to replay and rewrite repository history and could be affected by unrelated repository state. v1 therefore uses its own content-addressed store; see the [ADR](design/ADR__replace-git-with-own-content-addressed-store.md).
+The trade-offs are real: bakon does not do collaboration, remotes, signing, or merge, and it does not use Git's delta compression. Use Git for those. bakon is not a Git replacement; it only covers single-machine, single-file history. Version 0.x did use Git as a backend; pruning there had to replay and rewrite repository history and could be affected by unrelated repository state. v1 therefore uses its own content-addressed store; see the [ADR](design/ADR__replace-git-with-own-content-addressed-store.md).
 
 ## Find by goal
 
