@@ -1,3 +1,5 @@
+English | [简体中文](README.md)
+
 # bakon user guide
 
 bakon keeps version history for individual files. You edit a file in place with your usual editor; after each save bakon records a new version. Version numbers are increasing integers. Reverting does not delete history; it records a new version.
@@ -10,6 +12,18 @@ Terms used throughout:
 - **Store**: the directory where bakon keeps historical copies; by default `~/.bakon/store`.
 - **Hook**: a command that runs after a version is saved.
 - **Revert**: restore a file to an old version and append a new version.
+
+## Why not just use Git?
+
+Bakon manages "the save history of one config file", not "the commit history of a code repository". Git has several mismatches:
+
+- Git records repository snapshots, not a per-file stream. Every save needs `add` and `commit` plus a message; if you forget, there is no version. Bakon records automatically when `edit` returns, and version numbers are plain integers.
+- Git needs a repository boundary and a working tree. `nginx.conf` and `/etc/hosts` often live in different places; creating a repository for each file complicates layout and backups. Bakon keeps one store and a path map.
+- Reverting in Git is a new commit, but pruning old history requires rewriting and `gc`; Bakon's revert also appends a version, and pruning only truncates its own manifest without touching unrelated files.
+- Git is an external runtime dependency and is affected by `GIT_DIR`, `GIT_WORK_TREE`, and similar variables. Bakon is one binary, needs no Git, and calls no external commands.
+- Backup and restore mean copying one directory; no packfiles, refs, reflog, or fsck.
+
+The trade-offs are real: Bakon does not do collaboration, remotes, signing, or merge, and it does not use Git's delta compression. Use Git for those. Bakon is not a Git replacement; it only covers single-machine, single-file history. Version 0.x did use Git as a backend; pruning there had to replay and rewrite repository history and could be affected by unrelated repository state. v1 therefore uses its own content-addressed store; see the [ADR](design/ADR__replace-git-with-own-content-addressed-store.md).
 
 ## Find by goal
 
@@ -289,6 +303,7 @@ The file is tracked and `bakon log <file>` shows at least version 0; after a cha
 
 - The note did not appear: confirm that `edit` actually created a version. No content change means no version and no note.
 - The note is too long or contains a line break: notes are single-line and at most 500 characters. An empty note, control characters, or overlong text exits 2.
+- An older store with no notes: bakon 1.1 reads and edits it directly; the manifest is upgraded to schema 2 only when you first use `bakon note`, and returns to schema 1 when all notes are removed.
 - An older bakon cannot read a manifest with notes: notes use manifest schema 2 and require bakon 1.1 or newer. Manifests without notes stay on schema 1.
 
 ### Done when

@@ -17,7 +17,7 @@
 - A-11 已修复：`verify` 只用成功解析的清单构造引用集；损坏清单只形成报告项，不再中断。存在损坏清单时报告 `orphan_scan`，`--fix` 跳过孤儿回收与索引修复，避免删除仍可能被引用的对象。
 - A-12 已修复：`hook set/unset` 与 `config init` 支持 human/plain/json；`--no-hook` 提升为全局参数，子命令前后均可使用；API 文档删除未实现的 `--no-color`。
 - P3 已在 Ubuntu 可验证范围内收敛：A-13 至 A-19、O-01 至 O-09、O-11 至 O-13 已修复或按诊断契约修正文档；只读锁、版本上界、临时文件清理、损坏对象、apply 标记、恢复退出码、broken pipe、配置原子写入与索引重写均有回归用例。O-10 与 Windows 相关项保留。
-- A-20 已按 [[ADR__exit-9-when-durability-uncertain]] 实现：清单 `rename` 为提交点，父目录 `fsync` 失败返回退出码 9；`edit` 的可见版本、`revert` 的 `.pending` 保留与后续恢复有故障注入用例；对象、`.pending`、索引与标记的写入仍严格返回 8；当前测试总数 171，另有 1 个 `compile_fail` 文档用例。
+- A-20 已按 [[ADR__exit-9-when-durability-uncertain]] 实现：清单 `rename` 为提交点，父目录 `fsync` 失败返回退出码 9；`edit` 的可见版本、`revert` 的 `.pending` 保留与后续恢复有故障注入用例；对象、`.pending`、索引与标记的写入仍严格返回 8；当前测试总数 172，另有 1 个 `compile_fail` 文档用例。
 
 ## Known limitations
 

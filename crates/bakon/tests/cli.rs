@@ -479,6 +479,47 @@ fn notes_survive_rename_and_prune() {
 }
 
 #[test]
+fn schema_one_manifests_from_before_notes_can_be_read_and_annotated() {
+    let fixture = Fixture::new(b"one");
+    let editor = editor_script(fixture.temp(), "printf 'two' > \"$1\"");
+    assert_eq!(fixture.edit(&editor).status.code(), Some(0));
+
+    let path = fixture.run(&["--format", "plain", "path", fixture.file()]);
+    let manifest_path = plain_field(stdout(&path).trim(), 2).to_owned();
+    let before = fs::read_to_string(&manifest_path).unwrap();
+    assert!(before.contains("\"schema\": 1"), "{before}");
+    assert!(!before.contains("\"note\""), "{before}");
+
+    let log = fixture.run(&["--format", "json", "log", fixture.file()]);
+    assert!(stdout(&log).contains("\"note\":null"), "{}", stdout(&log));
+
+    let second = editor_script_named(fixture.temp(), "second.sh", "printf 'three' > \"$1\"");
+    assert_eq!(fixture.edit(&second).status.code(), Some(0));
+    let after_edit = fs::read_to_string(&manifest_path).unwrap();
+    assert!(after_edit.contains("\"schema\": 1"), "{after_edit}");
+
+    let set = fixture.run(&["note", fixture.file(), "0", "旧基线备注"]);
+    assert_eq!(set.status.code(), Some(0), "stderr: {}", stderr(&set));
+    let annotated = fs::read_to_string(&manifest_path).unwrap();
+    assert!(annotated.contains("\"schema\": 2"), "{annotated}");
+    assert!(annotated.contains("旧基线备注"), "{annotated}");
+
+    let cleared = fixture.run(&["note", fixture.file(), "0", "--clear"]);
+    assert_eq!(
+        cleared.status.code(),
+        Some(0),
+        "stderr: {}",
+        stderr(&cleared)
+    );
+    let cleared_manifest = fs::read_to_string(&manifest_path).unwrap();
+    assert!(
+        cleared_manifest.contains("\"schema\": 1"),
+        "{cleared_manifest}"
+    );
+    assert!(!cleared_manifest.contains("\"note\""), "{cleared_manifest}");
+}
+
+#[test]
 fn note_rejects_invalid_text_and_missing_versions() {
     let fixture = Fixture::new(b"one");
     let noop = editor_script(fixture.temp(), "exit 0");
