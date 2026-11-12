@@ -38,6 +38,7 @@ The trade-offs are real: bakon does not do collaboration, remotes, signing, or m
 - Control how many versions are kept and reclaim space
 - Rename a tracked file
 - List tracked files and find the store
+- Understand global and per-file configuration
 - Change the editor, store location, or retention
 - Check, back up, and restore the store
 - Deal with errors
@@ -488,6 +489,7 @@ The external content is either a readable version or saved as `salvage`; no cont
 
 - The file is tracked.
 - The hook command can run in bakon's current shell environment.
+- Hooks are per-file configuration; there is no global hook.
 
 ### Steps
 
@@ -616,6 +618,8 @@ Each successful save runs the hook as expected; failures are visible through exi
 
    The version count is within the limit and storage usage drops.
 
+A single file can override the global limit with the manifest's `retention` field. There is no `bakon retention` command yet; see "Configuration files: global and per-file".
+
 ### Common mistakes
 
 - Pruning cannot be undone. Export anything you need with `show` first.
@@ -733,6 +737,60 @@ The recorded path is the new one; the old path is untracked; a re-tracked old pa
 ### Done when
 
 You know which files are tracked, where their history lives, and how much space the store uses.
+
+## Configuration files: global and per-file
+
+bakon has two configuration layers with different scopes:
+
+| Layer | Location | What it controls | How to change it |
+|---|---|---|---|
+| Global | `~/.config/bakon/config.toml`, or `$BAKON_HOME/config.toml` | Default store, default editor, global retention limit | `bakon config init` / `bakon config show`, then edit the TOML |
+| Per-file | `store/files/<id>.json` | That file's `hook` and `retention` | Hooks use `bakon hook ...`; retention has no CLI setter yet |
+
+### Global configuration
+
+The global config file is optional TOML. If it is missing, all values come from built-in defaults. Example:
+
+```toml
+store = "/absolute/path/to/store"
+editor = "nano"
+
+[retention]
+max_versions = 100
+```
+
+- `store`: default store directory. A relative path depends on the current directory; prefer an absolute path.
+- `editor`: default editor for `bakon edit`; `--editor`, `$VISUAL`, and `$EDITOR` take precedence.
+- `retention.max_versions`: global default retention; `0` means unlimited, and the default is 100.
+
+Lookup order:
+
+- Config: `--config` → `BAKON_CONFIG` → `$BAKON_HOME/config.toml` → `$XDG_CONFIG_HOME/bakon/config.toml` → `~/.config/bakon/config.toml`.
+- Store: `--store` → `BAKON_STORE` → config `store` → `$BAKON_HOME/store` → `~/.bakon/store`.
+- Editor: `--editor` → `$VISUAL` → `$EDITOR` → config `editor` → `vi`.
+
+`bakon config init` writes a commented default file and refuses to overwrite an existing one. `bakon config show` prints the effective config path, store path, editor, and `max_versions`. A malformed config or an unknown field exits 2.
+
+### Per-file configuration
+
+Each tracked file has a manifest at `store/files/<id>.json`. The manifest holds both that file's configuration and its history; `bakon path <file>` prints its location. Only the configuration fields are shown here:
+
+```json
+{
+  "hook": "systemctl reload nginx",
+  "retention": { "max_versions": 20 },
+  "path": "/etc/nginx/nginx.conf",
+  "versions": ["..."]
+}
+```
+
+- `hook`: that file's change hook, as a shell command string. No field means no hook. Manage it with `bakon hook set/show/unset`. Hooks have no global default; they are per-file only.
+- `retention`: that file's retention policy. A missing field inherits the global value; `{ "max_versions": 0 }` means unlimited for this file; `n > 0` keeps only the newest n versions. It is applied after each commit, and `bakon prune` also uses it.
+- Per-file retention has no `bakon retention set` command yet. Do not edit the manifest by hand to bypass locking and atomic writes; use the global setting for now, and switch to per-file overrides if a dedicated command is added later.
+- `path`, `versions`, and `note` in the manifest are not configuration: use `bakon mv` for the path and `bakon note` for notes.
+- `index.json` is only a path cache, not a configuration file.
+
+Per-file configuration follows the file identity: `bakon mv` keeps the hook and retention; when a version with a note is pruned, the note disappears with that version.
 
 ## Change the editor, store location, or retention
 

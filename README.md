@@ -38,6 +38,7 @@ bakon 管的是“单个配置文件的每次保存”，不是“一个代码�
 - 控制保留多少个版本、清理空间
 - 给文件改名
 - 查看所有被管理的文件和存储位置
+- 了解全局配置和单文件配置
 - 修改编辑器、存储位置或保留数量
 - 检查、备份和恢复存储
 - 遇到错误时怎么办
@@ -488,6 +489,7 @@ EDITOR=nano bakon edit /etc/hosts
 
 - 文件已被纳管。
 - 钩子命令在 bakon 当前的 shell 环境中可执行。
+- hook 是单文件配置，没有全局 hook；每个文件分别设置。
 
 ### 步骤
 
@@ -616,6 +618,8 @@ BAKON_HOOK=1     表示当前在钩子中，防止递归
 
    版本数不超过上限；存储占用随裁剪下降。
 
+单文件也可以在清单的 `retention` 字段覆盖全局值；当前没有 `bakon retention` 命令，详见「配置文件：全局与单文件」。
+
 ### 常见偏差
 
 - 裁剪不可恢复：确认保留数量再执行。需要保留的内容先 `show` 导出。
@@ -734,6 +738,60 @@ BAKON_HOOK=1     表示当前在钩子中，防止递归
 ### 完成后
 
 你知道哪些文件被管理、它们的历史在哪里，以及存储占了多少空间。
+
+## 配置文件：全局与单文件
+
+bakon 有两层配置，作用范围不同：
+
+| 层级 | 位置 | 管什么 | 修改方式 |
+|---|---|---|---|
+| 全局 | `~/.config/bakon/config.toml`，或 `$BAKON_HOME/config.toml` | 默认存储位置、默认编辑器、全局保留上限 | `bakon config init` / `bakon config show`，再编辑 TOML |
+| 单文件 | `store/files/<id>.json` | 该文件的 `hook` 与 `retention` | hook 用 `bakon hook ...`；retention 目前没有 CLI 设置命令 |
+
+### 全局配置
+
+全局配置文件是可选的 TOML 文件，不存在时全部使用内置默认值。示例：
+
+```toml
+store = "/absolute/path/to/store"
+editor = "nano"
+
+[retention]
+max_versions = 100
+```
+
+- `store`：默认存储目录。相对路径会随当前目录变化，建议写绝对路径。
+- `editor`：`bakon edit` 的默认编辑器；`--editor`、`$VISUAL`、`$EDITOR` 的优先级更高。
+- `retention.max_versions`：全局默认保留数量；`0` 表示不限制，缺省为 100。
+
+查找顺序：
+
+- 配置：`--config` → `BAKON_CONFIG` → `$BAKON_HOME/config.toml` → `$XDG_CONFIG_HOME/bakon/config.toml` → `~/.config/bakon/config.toml`。
+- 存储：`--store` → `BAKON_STORE` → 配置 `store` → `$BAKON_HOME/store` → `~/.bakon/store`。
+- 编辑器：`--editor` → `$VISUAL` → `$EDITOR` → 配置 `editor` → `vi`。
+
+`bakon config init` 写入一份带注释的默认配置，文件已存在时不覆盖；`bakon config show` 显示实际使用的配置路径、存储路径、编辑器和 `max_versions`。配置解析失败或出现未知字段时退出 2。
+
+### 单文件配置
+
+每个被管理文件在 `store/files/<id>.json` 有一份清单。清单同时保存该文件的配置和历史；用 `bakon path <file>` 可以找到它。下面只列出配置相关字段：
+
+```json
+{
+  "hook": "systemctl reload nginx",
+  "retention": { "max_versions": 20 },
+  "path": "/etc/nginx/nginx.conf",
+  "versions": ["..."]
+}
+```
+
+- `hook`：该文件的变更钩子，是一条 shell 命令字符串；没有这个字段表示没有 hook。用 `bakon hook set/show/unset` 管理。hook 没有全局配置，只有单文件配置。
+- `retention`：该文件的保留策略。字段缺失表示继承全局；`{ "max_versions": 0 }` 表示该文件不限制；`n > 0` 表示只保留最新 n 个版本。每次提交后自动裁剪，`bakon prune` 也按它执行。
+- 单文件 retention 目前没有 `bakon retention set` 之类的 CLI 命令。不要手工改清单来绕过锁和原子写；需要调整保留数量时，当前请使用全局配置，后续如增加专用命令再改用单文件覆盖。
+- 清单里的 `path`、`versions`、`note` 不是配置项：路径用 `bakon mv`，备注用 `bakon note`。
+- `index.json` 只是路径缓存，不是配置文件。
+
+单文件配置跟着文件身份走：`bakon mv` 改名不会丢 hook 或 retention；带备注的版本被裁剪时，备注随版本一起消失。
 
 ## 修改编辑器、存储位置或保留数量
 
